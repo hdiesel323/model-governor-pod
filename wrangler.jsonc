@@ -1,0 +1,33 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "model-governor-pod",
+  "main": "src/worker.ts",
+  "compatibility_date": "2024-11-01",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "model-governor-pod-db",
+      "database_id": "2c475965-3e8a-4d0c-b0dc-389283ca8634"
+    }
+  ],
+  "services": [
+    {
+      "binding": "FACTORY_HUB",
+      "service": "factory-hub"
+    }
+  ],
+  "ai": {
+    "binding": "AI"
+  },
+  "triggers": {
+    "crons": [
+      "*/5 * * * *"
+    ]
+  },
+  "observability": {
+    "enabled": true
+  }
+}
