@@ -48,16 +48,26 @@ The **Model Governor Pod** (`model-governor-pod`) acts as the central intelligen
 
 ## ⚡ The TokenMaxxing Hierarchy
 
-To keep API spend near **$0.00** across dozens of active pods, the Governor routes traffic through a prioritized tier cascade:
+To keep API spend near **$0.00** across dozens of active pods, the Governor routes traffic through a prioritized multi-tier cascade across all our integrated providers:
 
 | Tier | Provider & Model | Category | Cost / 1M Tokens | Throughput | Use Case |
 |---|---|---|---|---|---|
 | **Tier 0 (Free)** | **Cloudflare Workers AI**<br>`@cf/meta/llama-3.1-8b-instruct` | `fast_classification` | **$0.00** | ~240 tok/s (85ms) | Intent classification, topic routing, quick extraction. |
-| **Tier 0 (Free)** | **Cerebras**<br>`llama3.3-70b` | `general_reasoning` | **$0.00** | **~1,400 tok/s** (120ms) | Standard task execution, JSON structuring, audits. |
+| **Tier 0 (Free)** | **Cerebras**<br>`llama3.3-70b` & `gpt-oss-120b` | `general_reasoning` | **$0.00** | **~1,400 tok/s** (120ms) | Standard task execution, JSON structuring, audits. |
 | **Tier 0 (Free)** | **OpenRouter Free**<br>`google/gemini-2.0-flash-exp:free` | `general_reasoning` | **$0.00** | ~185 tok/s (200ms) | Large document parsing (up to 1,000,000 token context). |
 | **Tier 0 (Free)** | **OpenRouter Free**<br>`deepseek/deepseek-r1:free` | `deep_audit` | **$0.00** | ~95 tok/s (450ms) | Complex logic verification and mathematical reasoning. |
-| **Tier 1 (Cheap)** | **Fireworks AI**<br>`llama-3.3-70b-instruct` | `general_reasoning` | $0.90 | ~160 tok/s (180ms) | Fallback when free provider quotas are momentarily rate-limited. |
-| **Tier 2 (Gated)** | **Anthropic**<br>`claude-3-5-sonnet-20241022` | `deep_audit` | $3.00 in / $15.00 out | ~75 tok/s (850ms) | **Strictly gated** for high-risk Red Team verification gates. |
+| **Tier 0 (Free)** | **OpenRouter Free**<br>`meta-llama/llama-3.3-70b-instruct:free` | `general_reasoning` | **$0.00** | ~140 tok/s (230ms) | Free general task execution and structured synthesis. |
+| **Tier 0 (Free)** | **NVIDIA NIM (Build)**<br>`meta/llama-3.3-70b-instruct` | `general_reasoning` | **$0.00** | ~175 tok/s (190ms) | High-speed enterprise inference via NVIDIA developer quota. |
+| **Tier 0 (Free)** | **NVIDIA NIM (Build)**<br>`nvidia/minimax-m3` | `general_reasoning` | **$0.00** | ~130 tok/s (310ms) | 1M context analysis via NVIDIA free API credits. |
+| **Tier 0.5 (OAuth)** | **OrcaRouter**<br>`orcarouter/auto` | `general_reasoning` | **$0.00\*** | ~220 tok/s (160ms) | Dynamic smart routing across composite providers and pooled credits. |
+| **Tier 0.5 (OAuth)** | **Codex CLI**<br>`openai-codex/gpt-5.6-luna` | `coding` | **$0.00\*** | ~180 tok/s (190ms) | Fast autonomous coding, diff creation, unit tests ($0 marginal API cost). |
+| **Tier 0.5 (OAuth)** | **Codex CLI**<br>`openai-codex/gpt-5.5` | `coding` | **$0.00\*** | ~140 tok/s (250ms) | Multi-file code generation and architectural refactoring. |
+| **Tier 0.5 (OAuth)** | **Codex CLI**<br>`openai-codex/gpt-5.6-sol` | `deep_audit` | **$0.00\*** | ~110 tok/s (380ms) | High-context code review and architectural audits. |
+| **Tier 1 (Cheap)** | **Fireworks AI**<br>`accounts/fireworks/models/llama-v3p3-70b-instruct` | `general_reasoning` | $0.90 | ~160 tok/s (180ms) | Low-cost fallback when free quotas are momentarily rate-limited. |
+| **Tier 1 (Cheap)** | **Fireworks AI**<br>`fireworks/gpt-oss-120b` | `general_reasoning` | $1.20 | ~130 tok/s (220ms) | Heavy synthetic reasoning fallback. |
+| **Tier 2 (Gated)** | **Anthropic**<br>`claude-3-5-sonnet-20241022` | `deep_audit` | $3.00 in / $15.00 out | ~75 tok/s (850ms) | **Strictly gated** for high-risk Red Team consensus verification. |
+
+*\* Tier 0.5 (OAuth / Codex / OrcaRouter) utilizes client-managed enterprise accounts or ChatGPT Plus/Team subscriptions with $0.00 marginal API charges.*
 
 ---
 
