@@ -52,7 +52,9 @@ export default {
     if ((method === "GET" || method === "HEAD") && (url.pathname === "/" || url.pathname === "/index.html")) {
       const tasks = await getTasks(env.DB, 30);
       const messages = await getMessages(env.DB, 20);
-      const html = renderPodUiHtml(config, tasks, messages);
+      const stats = await getTelemetryStats(env.DB);
+      const catalog = await getModelCatalog(env.DB);
+      const html = renderPodUiHtml(config, tasks, messages, stats, catalog);
 
       if (method === "HEAD") {
         return new Response(null, { status: 200, headers: { ...corsHeaders, "Content-Type": "text/html; charset=utf-8" } });
