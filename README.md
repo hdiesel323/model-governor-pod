@@ -1,185 +1,155 @@
-# Autonomous Worker Pod Chassis
+# Model Governor Pod
 
-> An edge-first, replicable template for building autonomous, durable worker pods with persistent state and real-time observability.
+> Autonomous TokenMaxxing Engine, Cost Telemetry & Proactive Model Radar on Cloudflare Workers + D1.
 
-This repository provides a standardized chassis for creating specialized autonomous worker pods. Each pod is an independent, serverless micro-agent that runs 24/7 on edge infrastructure, executes assigned tasks, maintains persistent state, and communicates over an asynchronous event mesh.
+The **Model Governor Pod** (`model-governor-pod`) acts as the central intelligence and cost-optimization gateway for the autonomous agent collective. It enforces a strict **TokenMaxxing strategy**—routing standard tasks to 100% free/OAuth models, logging real-time token spend and savings, and proactively benchmarking new models in the wild.
+
+- **Live URL**: [https://model-governor-pod.walterhudson462.workers.dev](https://model-governor-pod.walterhudson462.workers.dev)
+- **Domain**: `telemetry`
+- **Role**: `governor`
+- **Cloudflare D1 Database**: `model-governor-pod-db` (`2c475965-3e8a-4d0c-b0dc-389283ca8634`)
+- **Native Edge AI**: Direct Cloudflare **Workers AI** binding (`env.AI`)
 
 ---
 
 ## 🏗️ Architecture
 
-Every pod built from this chassis is **edge-native, self-contained, and decoupled from developer machines**:
-
 ```
  ┌────────────────────────────────────────────────────────┐
- │            Central Orchestration Mesh / Hub            │
- │            (HTTP / Webhook / Event Mesh)               │
+ │                      Factory Hub                       │
+ │        https://factory-hub.walterhudson462.workers.dev │
  └─────────────┬────────────────────────────▲─────────────┘
-               │ task.assigned              │ heartbeat
-               │ (Event Envelope)           │ task.progress / task.completed
+               │ model.radar_report         │ heartbeat
+               │ (Telemetry Envelope)       │ model.route
                ▼                            │
  ┌──────────────────────────────────────────┴─────────────┐
- │       Autonomous Worker Pod (Cloudflare Worker)        │
+ │         Model Governor Pod (Cloudflare Worker)         │
  │                                                        │
  │  ┌──────────────┐   ┌───────────────┐  ┌─────────────┐ │
- │  │ / (Cockpit)  │   │  Event Mesh   │  │  Cron / 5m  │ │
- │  │ Dark Mode UI │   │  Client Node  │  │  Keepalive  │ │
+ │  │ / (Cockpit)  │   │  Tincan Mesh  │  │  Cron / 5m  │ │
+ │  │ TokenMaxxing │   │  Client Node  │  │ Model Radar │ │
  │  └──────────────┘   └───────┬───────┘  └──────┬──────┘ │
  │                             │                 │        │
  │                     ┌───────▼─────────────────▼──────┐ │
- │                     │ Pluggable Domain Task Handler  │ │
- │                     │       (src/handler.ts)         │ │
- │                     └───────────────┬────────────────┘ │
- │                                     │                  │
- │                             ┌───────▼───────┐          │
- │                             │ Cloudflare D1 │          │
- │                             │ / SQLite WAL  │          │
- │                             └───────────────┘          │
+ │                     │    TokenMaxxing Routing &      │ │
+ │                     │       Telemetry Engine         │ │
+ │                     └───────┬────────────────────────┘ │
+ │                             │                          │
+ │              ┌──────────────┴──────────────┐           │
+ │              ▼                             ▼           │
+ │      ┌───────────────┐             ┌───────────────┐   │
+ │      │ Cloudflare D1 │             │ Workers AI    │   │
+ │      │ Usage Ledger  │             │ Free Models   │   │
+ │      └───────────────┘             └───────────────┘   │
  └────────────────────────────────────────────────────────┘
 ```
 
-1. **Edge-First Deployment**: Runs globally on Cloudflare Workers with an isolated Cloudflare D1 SQL database.
-2. **Zero-Local Dependency**: No persistent background daemons or cron jobs required on local machines. Pods run 24/7 on distributed edge infrastructure.
-3. **Dual-Engine Persistence**: Seamless parity between local development (Node.js + native `node:sqlite` in WAL mode) and edge production (Cloudflare D1 SQL database).
-4. **Decoupled Architecture**: Developers only customize one file: [`src/handler.ts`](src/handler.ts). Database migrations, mesh routing, keepalives, and the web cockpit UI are handled automatically by the chassis.
-5. **Universal Human-Readable Summary Engine**: Automatically transforms raw task payloads, topic namespaces, and resource URLs into clear, plain-English definitions for human review.
+---
+
+## ⚡ The TokenMaxxing Hierarchy
+
+To keep API spend near **$0.00** across dozens of active pods, the Governor routes traffic through a prioritized tier cascade:
+
+| Tier | Provider & Model | Category | Cost / 1M Tokens | Throughput | Use Case |
+|---|---|---|---|---|---|
+| **Tier 0 (Free)** | **Cloudflare Workers AI**<br>`@cf/meta/llama-3.1-8b-instruct` | `fast_classification` | **$0.00** | ~240 tok/s (85ms) | Intent classification, topic routing, quick extraction. |
+| **Tier 0 (Free)** | **Cerebras**<br>`llama3.3-70b` | `general_reasoning` | **$0.00** | **~1,400 tok/s** (120ms) | Standard task execution, JSON structuring, audits. |
+| **Tier 0 (Free)** | **OpenRouter Free**<br>`google/gemini-2.0-flash-exp:free` | `general_reasoning` | **$0.00** | ~185 tok/s (200ms) | Large document parsing (up to 1,000,000 token context). |
+| **Tier 0 (Free)** | **OpenRouter Free**<br>`deepseek/deepseek-r1:free` | `deep_audit` | **$0.00** | ~95 tok/s (450ms) | Complex logic verification and mathematical reasoning. |
+| **Tier 1 (Cheap)** | **Fireworks AI**<br>`llama-3.3-70b-instruct` | `general_reasoning` | $0.90 | ~160 tok/s (180ms) | Fallback when free provider quotas are momentarily rate-limited. |
+| **Tier 2 (Gated)** | **Anthropic**<br>`claude-3-5-sonnet-20241022` | `deep_audit` | $3.00 in / $15.00 out | ~75 tok/s (850ms) | **Strictly gated** for high-risk Red Team verification gates. |
 
 ---
 
-## ⚡ 1-Command Scaffolding
+## 📡 API Reference
 
-To stamp out a new worker pod instance from this chassis:
-
+### 1. Dynamic Model Route (`GET /api/models/route`)
+Worker pods query this endpoint to receive the optimal model for their category:
 ```bash
-node bin/scaffold.js --name <pod-name> --role <role> --domain <domain> [options]
+curl -s "https://model-governor-pod.walterhudson462.workers.dev/api/models/route?category=general_reasoning&prefer_free=true"
 ```
-
-### Options:
-- `--name`: Unique identifier for the pod (e.g. `document-parser`, `billing-auditor`, `data-indexer`)
-- `--role`: Functional role (e.g. `parser`, `auditor`, `indexer`, `worker`)
-- `--domain`: Project group or domain namespace (e.g. `operations`, `analytics`, `finance`)
-- `--out`: Target output directory (defaults to `../<name>`)
-- `--no-db`: Skip automatic Cloudflare D1 database provisioning
-
-### Example:
-```bash
-node bin/scaffold.js \
-  --name telemetry-processor \
-  --role processor \
-  --domain analytics
-```
-
----
-
-## 📁 Repository Structure
-
-```
-├── bin/
-│   └── scaffold.js        # 1-command generator for new pod instances
-├── src/
-│   ├── types.ts           # Core interfaces (PodConfig, TaskRecord, TaskHandler)
-│   ├── config.ts          # Environment configuration loader
-│   ├── handler.ts         # ⭐ Pluggable business logic (ONLY FILE YOU MODIFY)
-│   ├── tincan.ts          # Universal mesh client & event publisher
-│   ├── ui.ts              # Built-in dark-mode Cockpit UI with task simulator
-│   ├── worker.ts          # Cloudflare Worker entrypoint + scheduled cron handler
-│   └── main.ts            # Local development runner (Node.js + node:sqlite)
-├── tests/
-│   └── pod.test.ts        # Unit test suite
-├── schema.sql             # Dual D1 / SQLite database schema
-├── wrangler.jsonc         # Cloudflare Workers configuration
-├── justfile               # Operational recipe runner
-└── package.json
-```
-
----
-
-## 🛠️ Implementing Custom Business Logic
-
-To implement your pod's functionality, edit [`src/handler.ts`](src/handler.ts). The chassis calls `handle(task, context)` whenever a new task is received:
-
-```typescript
-import { TaskRecord, HandlerContext, TaskHandler } from "./types.js";
-
-export class CustomPodHandler implements TaskHandler {
-  public name = "custom-handler";
-
-  public canHandle(topic: string, _spec: any): boolean {
-    return true; // Match topics this pod specializes in
-  }
-
-  public async handle(task: TaskRecord, context: HandlerContext): Promise<any> {
-    const { podConfig, now, publishEvent } = context;
-
-    // 1. Perform domain work (API calls, data processing, LLM inference, transformations)
-    const output = await processTask(task.spec);
-
-    // 2. Formulate execution result
-    const result = {
-      taskId: task.taskId,
-      status: "completed",
-      artifacts: output,
-      completedAt: new Date(now).toISOString(),
-    };
-
-    // 3. Notify the central hub of completion over the event mesh
-    await publishEvent("task.completed", "hub", {
-      taskId: task.taskId,
-      workerPod: podConfig.id,
-      event: "completed",
-      result,
-      timestamp: now,
-    });
-
-    return result;
+**Response**:
+```json
+{
+  "recommendedModel": {
+    "id": "cerebras-llama-3-3-70b",
+    "provider": "cerebras",
+    "modelName": "llama3.3-70b",
+    "category": "general_reasoning",
+    "tier": "FREE_TIER",
+    "inputCostPer1M": 0,
+    "outputCostPer1M": 0,
+    "tokensPerSec": 1400,
+    "qualityScore": 94
   }
 }
 ```
 
----
-
-## 🚀 Deployment
-
-### 1. Configure Cloudflare D1 Database
-Create an isolated D1 database for your pod:
+### 2. Record Usage Telemetry (`POST /api/telemetry/log`)
+Logs token usage, computes actual cost, and calculates dollars saved vs flagship GPT-4o baseline:
 ```bash
-wrangler d1 create <pod-name>-db
-```
-Paste the generated `database_id` into your `wrangler.jsonc`.
-
-### 2. Apply Schema
-```bash
-wrangler d1 execute <pod-name>-db --remote --file=schema.sql -y
-```
-
-### 3. Deploy Worker
-```bash
-wrangler deploy
+curl -X POST https://model-governor-pod.walterhudson462.workers.dev/api/telemetry/log \
+  -H "Content-Type: application/json" \
+  -d '{
+    "podId": "authority-seo-pod",
+    "taskId": "task_101",
+    "provider": "cerebras",
+    "modelId": "cerebras-llama-3-3-70b",
+    "promptTokens": 1200,
+    "completionTokens": 350,
+    "latencyMs": 115,
+    "tier": "FREE_TIER",
+    "actualCost": 0.00
+  }'
 ```
 
-Your pod is now live globally at `https://<pod-name>.<account>.workers.dev`.
+### 3. Get Telemetry & Savings Stats (`GET /api/telemetry/stats`)
+Returns network-wide token consumption and TokenMaxxing efficiency:
+```bash
+curl -s https://model-governor-pod.walterhudson462.workers.dev/api/telemetry/stats
+```
+**Response**:
+```json
+{
+  "stats": {
+    "totalTokens": 5600,
+    "totalCostUsd": 0,
+    "totalSavedUsd": 0.028,
+    "freeTierPercentage": 100,
+    "eventsCount": 3,
+    "topProviders": [
+      { "provider": "openrouter", "tokens": 3100, "cost": 0 },
+      { "provider": "cerebras", "tokens": 1550, "cost": 0 },
+      { "provider": "cloudflare_ai", "tokens": 950, "cost": 0 }
+    ]
+  }
+}
+```
+
+### 4. List Model Catalog (`GET /api/models`)
+Returns all active models with speed, context window, and pricing.
 
 ---
 
-## 📊 Observability & Cockpit UI
+## 🔍 Proactive Model Radar
 
-Each pod serves a self-contained web Cockpit UI at `/`:
-- **Real-Time Status**: Displays active capabilities, uptime status, and keepalive health.
-- **Task Execution Ledger**: Live record of tasks executed, processing status, and verified outputs.
-- **Manual Task Simulator**: Interactive form to trigger and test tasks directly against the edge runtime.
+Every 5 minutes (or via topic `model.radar_scan`), the Governor runs health and throughput probes against free model providers:
+1. Verifies endpoint availability and HTTP latency.
+2. Checks for provider rate-limits or quota deprecation.
+3. Dynamically updates `model_catalog` in D1 so all worker pods instantly shift traffic to the fastest healthy free model.
 
 ---
 
-## 🧪 Local Testing
+## 🧪 Testing & Verification
 
 ```bash
-# Run unit test suite
+# Run unit tests
 npm test
 
 # Type check
-npm run check # or: npx tsc --noEmit
+npm run check
 
-# Run local development server with SQLite WAL
+# Run local development server
 npm run dev
 ```
 
