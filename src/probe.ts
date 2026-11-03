@@ -130,7 +130,9 @@ export async function recordProbe(db: D1Database, target: ProbeTarget, r: ProbeR
       r.tokensPerSec, r.promptTokens, r.completionTokens, r.costUsd, r.error ?? null, now)
     .run();
   if (r.providerError) {
-    if (/HTTP 429/.test(r.error ?? "")) await db.prepare("UPDATE model_catalog SET status = 'rate_limited' WHERE id = ?").bind(target.id).run();
+    if (/HTTP 429/.test(r.error ?? "")) await db.prepare("UPDATE model_catalog SET status = 'rate_limited', last_benchmarked_at = ? WHERE id = ?").bind(now, target.id).run();
+    // 401/403/404: this account cannot use the model; park it for a day instead of re-probing every tick.
+    else if (/HTTP 40[134]/.test(r.error ?? "")) await db.prepare("UPDATE model_catalog SET status = 'degraded', last_benchmarked_at = ? WHERE id = ?").bind(now, target.id).run();
     return "provider_error";
   }
   const agg = await db.prepare(`SELECT COUNT(*) runs, SUM(passed) passed, SUM(total) total, AVG(latency_ms) lat, AVG(tokens_per_sec) tps
@@ -160,12 +162,14 @@ export async function runProbeCycle(db: D1Database, env: ProbeEnv & { PROBE_BUDG
   const spentBefore = await spentToday(db, now);
   const map = (r: any): ProbeTarget => ({ id: r.id, provider: r.provider, modelName: r.model_name, tier: r.tier, inputCostPer1M: r.input_cost_per_1m, outputCostPer1M: r.output_cost_per_1m });
   const free = await db.prepare(`SELECT * FROM model_catalog WHERE lifecycle != 'retired' AND tier = 'FREE_TIER' AND source = 'discovered'
-      AND (status != 'rate_limited' OR last_benchmarked_at IS NULL OR last_benchmarked_at < ?)
-      ORDER BY probe_runs ASC, first_seen_at DESC LIMIT ?`).bind(now - 3600_000, maxFree).all<any>();
+      AND (status = 'active' OR (status = 'rate_limited' AND last_benchmarked_at < ?) OR (status = 'degraded' AND last_benchmarked_at < ?))
+      ORDER BY probe_runs ASC, model_created_at DESC LIMIT ?`).bind(now - 3600_000, now - 86_400_000, maxFree).all<any>();
   const targets = (free.results ?? []).map(map);
   const skippedPaid: string[] = [];
+  // Paid: newest releases first; never re-spend on a model already measured 3 times unless it is approved.
   const paid = await db.prepare(`SELECT * FROM model_catalog WHERE lifecycle = 'candidate' AND tier = 'PAID' AND source = 'discovered'
-      ORDER BY probe_runs ASC, first_seen_at DESC LIMIT 5`).all<any>();
+      AND status = 'active' AND (probe_runs < 3 OR approved_by IS NOT NULL)
+      ORDER BY probe_runs ASC, model_created_at DESC LIMIT 5`).all<any>();
   let remaining = budget - spentBefore;
   for (const t of (paid.results ?? []).map(map)) {
     const est = estimateSuiteCost(t);
