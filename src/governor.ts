@@ -102,6 +102,7 @@ export async function resolveOptimalModel(
   category: string = "general_reasoning",
   opts: RouteOptions = {}
 ): Promise<ModelEntry | null> {
+  const now = Date.now();
   const where = ["lifecycle = 'qualified'", "status = 'active'"];
   const params: any[] = [];
   const excluded = (opts.excludeFamily || "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
@@ -113,9 +114,16 @@ export async function resolveOptimalModel(
     where.push("output_cost_per_1m IS NOT NULL AND output_cost_per_1m <= ?");
     params.push(opts.maxOutputCostPer1M);
   }
+  // Quota awareness (factory-hub#80): exclude providers that are exhausted or rate limited
+  where.push("provider NOT IN (SELECT provider FROM provider_quotas WHERE status IN ('exhausted', 'rate_limited') AND (resets_at IS NULL OR resets_at > ?))");
+  params.push(now);
+
   const order = category === "fast_classification"
     ? "tokens_per_sec DESC, quality_score DESC"
+    : category === "coding"
+    ? "quality_score DESC, CASE WHEN tier = 'OAUTH' THEN 0 WHEN tier = 'FREE_TIER' THEN 1 ELSE 2 END ASC, COALESCE(output_cost_per_1m, 1e9) ASC, tokens_per_sec DESC"
     : "quality_score DESC, COALESCE(output_cost_per_1m, 1e9) ASC, tokens_per_sec DESC";
+
   const row = await db
     .prepare(`SELECT * FROM model_catalog WHERE ${where.join(" AND ")} ORDER BY ${order} LIMIT 1`)
     .bind(...params)
@@ -269,5 +277,128 @@ export async function getTelemetryStats(db: D1Database): Promise<{
       cost: parseFloat((p.cost || 0).toFixed(4)),
     })),
     recentEvents,
+  };
+}
+
+export interface SubscriptionRecommendation {
+  family: string;
+  provider: string;
+  measuredEvents: number;
+  measuredSpendUsd: number;
+  monthlyProjectedSpendUsd: number;
+  subscriptionPriceUsd: number;
+  monthlyProjectedSavingsUsd: number;
+  recommended: boolean;
+  reason: string;
+}
+
+export interface SubscriptionAdvisorReport {
+  status: "insufficient_data" | "active";
+  message: string;
+  dataWindow: {
+    start: number | null;
+    end: number | null;
+    daysObserved: number;
+    eventsCount: number;
+  };
+  recommendations: SubscriptionRecommendation[];
+}
+
+export async function getSubscriptionAdvisor(
+  db: D1Database,
+  opts: { days?: number; minDays?: number; minEvents?: number } = {}
+): Promise<SubscriptionAdvisorReport> {
+  const windowDays = opts.days || 30;
+  const minDays = opts.minDays !== undefined ? opts.minDays : 7;
+  const minEvents = opts.minEvents !== undefined ? opts.minEvents : 50;
+  const now = Date.now();
+  const windowStart = now - windowDays * 86_400_000;
+
+  const windowRow = await db
+    .prepare(`
+      SELECT 
+        COUNT(*) as count,
+        MIN(created_at) as earliest,
+        MAX(created_at) as latest,
+        SUM(cost_usd) as total_cost
+      FROM llm_usage_events
+      WHERE created_at >= ?
+    `)
+    .bind(windowStart)
+    .first<any>();
+
+  const count = Number(windowRow?.count || 0);
+  const earliest = windowRow?.earliest ? Number(windowRow.earliest) : null;
+  const latest = windowRow?.latest ? Number(windowRow.latest) : null;
+  const daysObserved = earliest && latest && latest > earliest
+    ? +(Math.max(0.1, (latest - earliest) / 86_400_000)).toFixed(2)
+    : 0;
+
+  const dataWindow = {
+    start: earliest,
+    end: latest,
+    daysObserved,
+    eventsCount: count,
+  };
+
+  // factory-hub#80: names its data window and shows "insufficient data" until enough usage exists.
+  if (count < minEvents || daysObserved < minDays) {
+    return {
+      status: "insufficient_data",
+      message: `insufficient data: observed ${count} events across ${daysObserved} days (minimum ${minDays} days and ${minEvents} events required)`,
+      dataWindow,
+      recommendations: [],
+    };
+  }
+
+  const { results: familyUsage } = await db
+    .prepare(`
+      SELECT 
+        COALESCE(c.family, u.provider) as family,
+        u.provider,
+        COUNT(*) as events,
+        SUM(u.cost_usd) as spend
+      FROM llm_usage_events u
+      LEFT JOIN model_catalog c ON c.id = u.model_id
+      WHERE u.created_at >= ?
+      GROUP BY COALESCE(c.family, u.provider), u.provider
+    `)
+    .bind(windowStart)
+    .all<any>();
+
+  const { results: subPrices } = await db.prepare("SELECT * FROM subscription_prices").all<any>();
+  const subMap = new Map((subPrices || []).map((s) => [String(s.family).toLowerCase(), Number(s.monthly_price_usd)]));
+
+  const recommendations: SubscriptionRecommendation[] = [];
+  for (const row of familyUsage || []) {
+    const fam = String(row.family).toLowerCase();
+    const subPrice = subMap.get(fam);
+    const measuredSpend = Number(row.spend || 0);
+    const monthlyProjected = +((measuredSpend / Math.max(1, daysObserved)) * 30).toFixed(2);
+
+    if (subPrice !== undefined) {
+      const savings = +(monthlyProjected - subPrice).toFixed(2);
+      const recommended = savings > 0;
+      recommendations.push({
+        family: row.family,
+        provider: row.provider,
+        measuredEvents: Number(row.events),
+        measuredSpendUsd: +measuredSpend.toFixed(4),
+        monthlyProjectedSpendUsd: monthlyProjected,
+        subscriptionPriceUsd: subPrice,
+        monthlyProjectedSavingsUsd: savings,
+        recommended,
+        reason: recommended
+          ? `Projected spend ($${monthlyProjected}/mo) exceeds subscription price ($${subPrice}/mo). Projected net savings: $${savings}/mo.`
+          : `Projected spend ($${monthlyProjected}/mo) does not exceed subscription price ($${subPrice}/mo). Keep pay-as-you-go.`,
+      });
+    }
+  }
+
+  return {
+    status: "active",
+    message: "sufficient data observed for recommendation",
+    dataWindow,
+    recommendations,
   };
 }

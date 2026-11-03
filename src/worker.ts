@@ -4,7 +4,7 @@ import { setHubAuthToken } from "./skill-engine.js";
 import { activeHandler } from "./handler.js";
 import { renderPodUiHtml } from "./ui.js";
 import { TaskRecord } from "./types.js";
-import { getModelCatalog, resolveOptimalModel, recordUsage, getTelemetryStats, mapModel } from "./governor.js";
+import { getModelCatalog, resolveOptimalModel, recordUsage, getTelemetryStats, mapModel, getSubscriptionAdvisor } from "./governor.js";
 import { authGate } from "./auth.js";
 import { runDiscovery } from "./discovery.js";
 import { runProbeCycle, recordProbe } from "./probe.js";
@@ -148,6 +148,91 @@ export default {
         return json({ probe: r, lifecycle: await recordProbe(env.DB, target, r, Date.now()) }, 200, corsHeaders);
       }
       return json({ cycle: await runProbeCycle(env.DB, env) }, 200, corsHeaders);
+    }
+
+    // ADMIN: record probe results from local devices (Mac, HEL1) for OAuth subscription models (factory-hub#80)
+    if (method === "POST" && url.pathname === "/api/governor/probe-result") {
+      const body = (await request.json().catch(() => ({}))) as any;
+      if (!body.modelId || !body.provider || body.passed === undefined || !body.total || !body.device) {
+        return json({ error: "Missing required fields (modelId, provider, passed, total, device)" }, 400, corsHeaders);
+      }
+      const now = Date.now();
+      let row = await env.DB.prepare("SELECT * FROM model_catalog WHERE id = ?").bind(String(body.modelId)).first<any>();
+      if (!row) {
+        const modelName = String(body.modelName || body.modelId);
+        const family = String(body.family || body.provider);
+        const category = String(body.category || "coding");
+        await env.DB.prepare(`
+          INSERT INTO model_catalog (
+            id, provider, model_name, family, category, tier,
+            input_cost_per_1m, output_cost_per_1m, source, first_seen_at, last_seen_at, lifecycle, status
+          ) VALUES (?, ?, ?, ?, ?, 'OAUTH', 0, 0, 'oauth_device', ?, ?, 'candidate', 'active')
+        `).bind(body.modelId, body.provider, modelName, family, category, now, now).run();
+        row = await env.DB.prepare("SELECT * FROM model_catalog WHERE id = ?").bind(String(body.modelId)).first<any>();
+      }
+      const target = {
+        id: row.id,
+        provider: row.provider,
+        modelName: row.model_name,
+        tier: row.tier,
+        inputCostPer1M: row.input_cost_per_1m,
+        outputCostPer1M: row.output_cost_per_1m,
+      };
+      const probeRes = {
+        modelId: target.id,
+        passed: Number(body.passed),
+        total: Number(body.total),
+        latencyMs: body.latencyMs !== undefined ? Number(body.latencyMs) : null,
+        tokensPerSec: body.tokensPerSec !== undefined ? Number(body.tokensPerSec) : null,
+        promptTokens: Number(body.promptTokens || 0),
+        completionTokens: Number(body.completionTokens || 0),
+        costUsd: 0,
+        device: String(body.device),
+        error: body.error ? String(body.error) : undefined,
+        providerError: Boolean(body.providerError || body.error),
+      };
+      const lifecycle = await recordProbe(env.DB, target, probeRes, now);
+      return json({ status: "recorded", modelId: target.id, lifecycle, device: probeRes.device, probe: probeRes }, 200, corsHeaders);
+    }
+
+    // API: Subscription Advisor (factory-hub#80)
+    if (method === "GET" && url.pathname === "/api/governor/subscription-advisor") {
+      const days = Number(url.searchParams.get("days") || 30);
+      const minDays = url.searchParams.has("minDays") ? Number(url.searchParams.get("minDays")) : undefined;
+      const minEvents = url.searchParams.has("minEvents") ? Number(url.searchParams.get("minEvents")) : undefined;
+      const report = await getSubscriptionAdvisor(env.DB, { days, minDays, minEvents });
+      return json(report, 200, corsHeaders);
+    }
+
+    // Quotas: record or inspect rate limits / exhausted OAuth providers (factory-hub#80)
+    if (method === "GET" && url.pathname === "/api/governor/quotas") {
+      const rows = await env.DB.prepare("SELECT * FROM provider_quotas ORDER BY updated_at DESC").all<any>();
+      return json({ quotas: rows.results ?? [] }, 200, corsHeaders);
+    }
+    if (method === "POST" && url.pathname === "/api/governor/quotas") {
+      const body = (await request.json().catch(() => ({}))) as any;
+      if (!body.provider || !body.status) {
+        return json({ error: "Missing required fields (provider, status)" }, 400, corsHeaders);
+      }
+      const now = Date.now();
+      await env.DB.prepare(`
+        INSERT INTO provider_quotas (provider, status, error, exhausted_at, resets_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(provider) DO UPDATE SET
+          status = excluded.status,
+          error = excluded.error,
+          exhausted_at = excluded.exhausted_at,
+          resets_at = excluded.resets_at,
+          updated_at = excluded.updated_at
+      `).bind(
+        body.provider,
+        body.status,
+        body.error ?? null,
+        body.status !== "active" ? now : null,
+        body.resetsAt ?? null,
+        now
+      ).run();
+      return json({ status: "recorded", provider: body.provider, quotaStatus: body.status }, 200, corsHeaders);
     }
 
     // API: Record LLM Usage Telemetry
