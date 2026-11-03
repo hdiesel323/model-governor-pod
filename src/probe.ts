@@ -125,9 +125,9 @@ const DEMOTE_PASS_RATE = 0.6;
 /** Records a probe and re-derives the model's measured fields and lifecycle from stored probes only. */
 export async function recordProbe(db: D1Database, target: ProbeTarget, r: ProbeResult, now: number): Promise<string> {
   await db.prepare(`INSERT INTO model_probes (id, model_id, suite_version, passed, total, latency_ms, tokens_per_sec,
-      prompt_tokens, completion_tokens, cost_usd, error, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      prompt_tokens, completion_tokens, cost_usd, device, error, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
     .bind(`prb_${now}_${Math.random().toString(36).slice(2, 7)}`, target.id, SUITE_VERSION, r.passed, r.total, r.latencyMs,
-      r.tokensPerSec, r.promptTokens, r.completionTokens, r.costUsd, r.error ?? null, now)
+      r.tokensPerSec, r.promptTokens, r.completionTokens, r.costUsd, r.device ?? null, r.error ?? null, now)
     .run();
   if (r.providerError) {
     if (/HTTP 402/.test(r.error ?? "")) {
@@ -137,9 +137,21 @@ export async function recordProbe(db: D1Database, target: ProbeTarget, r: ProbeR
         .bind(JSON.stringify({ until: now + 86_400_000, reason: "HTTP 402 insufficient credits", provider: target.provider }), now).run();
       return "provider_error";
     }
-    if (/HTTP 429/.test(r.error ?? "")) await db.prepare("UPDATE model_catalog SET status = 'rate_limited', last_benchmarked_at = ? WHERE id = ?").bind(now, target.id).run();
-    // 401/403/404: this account cannot use the model; park it for a day instead of re-probing every tick.
-    else if (/HTTP 40[134]/.test(r.error ?? "")) await db.prepare("UPDATE model_catalog SET status = 'degraded', last_benchmarked_at = ? WHERE id = ?").bind(now, target.id).run();
+    if (/HTTP 429|rate[- ]limit|quota/i.test(r.error ?? "")) {
+      await db.prepare("UPDATE model_catalog SET status = 'rate_limited', last_benchmarked_at = ? WHERE id = ?").bind(now, target.id).run();
+      await db.prepare(`INSERT INTO provider_quotas (provider, status, error, exhausted_at, updated_at) VALUES (?, 'rate_limited', ?, ?, ?)
+        ON CONFLICT(provider) DO UPDATE SET status = 'rate_limited', error = excluded.error, updated_at = excluded.updated_at`)
+        .bind(target.provider, r.error ?? "rate limited", now, now).run().catch(() => {});
+    }
+    // 401/403/404 or quota/usage limit: park or mark exhausted
+    else if (/HTTP 40[134]|usage limit|unsupported/i.test(r.error ?? "")) {
+      await db.prepare("UPDATE model_catalog SET status = 'degraded', last_benchmarked_at = ? WHERE id = ?").bind(now, target.id).run();
+      if (/usage limit|quota/i.test(r.error ?? "")) {
+        await db.prepare(`INSERT INTO provider_quotas (provider, status, error, exhausted_at, updated_at) VALUES (?, 'exhausted', ?, ?, ?)
+          ON CONFLICT(provider) DO UPDATE SET status = 'exhausted', error = excluded.error, updated_at = excluded.updated_at`)
+          .bind(target.provider, r.error ?? "quota exhausted", now, now).run().catch(() => {});
+      }
+    }
     return "provider_error";
   }
   const agg = await db.prepare(`SELECT COUNT(*) runs, SUM(passed) passed, SUM(total) total, AVG(latency_ms) lat, AVG(tokens_per_sec) tps
@@ -149,7 +161,7 @@ export async function recordProbe(db: D1Database, target: ProbeTarget, r: ProbeR
   const rate = agg.total > 0 ? agg.passed / agg.total : 0;
   const row = await db.prepare("SELECT tier, approved_by, lifecycle FROM model_catalog WHERE id = ?").bind(target.id).first<any>();
   let lifecycle = row?.lifecycle ?? "candidate";
-  const allowed = row?.tier === "FREE_TIER" || Boolean(row?.approved_by);
+  const allowed = row?.tier === "FREE_TIER" || row?.tier === "OAUTH" || Boolean(row?.approved_by);
   if (lifecycle !== "retired") {
     if (agg.runs >= PROMOTE_MIN_RUNS && rate >= PROMOTE_PASS_RATE && allowed) lifecycle = "qualified";
     else if (lifecycle === "qualified" && Number(recent?.rate ?? 0) < DEMOTE_PASS_RATE) lifecycle = "candidate";

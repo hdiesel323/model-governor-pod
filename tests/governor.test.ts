@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { familyOf, fromOpenRouter, runDiscovery } from "../src/discovery.js";
 import { clean, estimateSuiteCost, gradeZipRegex, probeModel, recordProbe, runProbeCycle, SUITE } from "../src/probe.js";
-import { resolveOptimalModel, getModelCatalog } from "../src/governor.js";
+import { resolveOptimalModel, getModelCatalog, getSubscriptionAdvisor } from "../src/governor.js";
 import { authGate } from "../src/auth.js";
 
 function d1(sqlite: DatabaseSync): any {
@@ -182,7 +182,126 @@ describe("auth gate", () => {
   test("a pod token cannot approve spend; the admin token can", () => {
     assert.equal(authGate(req("POST", "/api/models/x/approve", "pod-secret"), env)!.status, 403);
     assert.equal(authGate(req("POST", "/api/governor/probe", "pod-secret"), env)!.status, 403);
+    assert.equal(authGate(req("POST", "/api/governor/probe-result", "pod-secret"), env)!.status, 403);
     assert.equal(authGate(req("POST", "/api/models/x/approve", "admin-secret"), env), null);
+    assert.equal(authGate(req("POST", "/api/governor/probe-result", "admin-secret"), env), null);
     assert.equal(authGate(req("POST", "/api/models/x/approve", "admin-secret"), {})!.status, 403, "fails closed without admin token");
+  });
+});
+
+describe("OAuth subscription models and device probing (factory-hub#80)", () => {
+  test("records probe with device provenance and $0 cost, qualifies without paid approval", async () => {
+    const { db, sqlite } = freshDb();
+    const now = Date.now();
+    const oauthTarget = {
+      id: "claude-code:claude-sonnet-5",
+      provider: "anthropic",
+      modelName: "claude-sonnet-5",
+      tier: "OAUTH",
+      inputCostPer1M: 0,
+      outputCostPer1M: 0,
+    };
+    sqlite.exec(`
+      INSERT INTO model_catalog (id, provider, model_name, family, category, tier, input_cost_per_1m, output_cost_per_1m, source, first_seen_at, last_seen_at, lifecycle, status)
+      VALUES ('claude-code:claude-sonnet-5', 'anthropic', 'claude-sonnet-5', 'anthropic', 'coding', 'OAUTH', 0, 0, 'oauth_device', ${now}, ${now}, 'candidate', 'active')
+    `);
+
+    // Run 3 passing probe cycles with device = "mac-mini"
+    for (let i = 1; i <= 3; i++) {
+      const probeRes = {
+        modelId: oauthTarget.id,
+        passed: 5,
+        total: 5,
+        latencyMs: 820,
+        tokensPerSec: 42.5,
+        promptTokens: 400,
+        completionTokens: 100,
+        costUsd: 0,
+        device: "mac-mini",
+      };
+      const lifecycle = await recordProbe(db, oauthTarget, probeRes, now + i * 1000);
+      assert.equal(lifecycle, i < 3 ? "candidate" : "qualified");
+    }
+
+    // Verify model_probes records device and 0 cost
+    const probeRows = sqlite.prepare("SELECT model_id, device, cost_usd FROM model_probes WHERE model_id = ?").all(oauthTarget.id) as any[];
+    assert.equal(probeRows.length, 3);
+    assert.equal(probeRows[0].device, "mac-mini");
+    assert.equal(probeRows[0].cost_usd, 0);
+
+    // Verify route?category=coding picks the qualified OAUTH model
+    const routed = await resolveOptimalModel(db, "coding");
+    assert.ok(routed);
+    assert.equal(routed.id, "claude-code:claude-sonnet-5");
+    assert.equal(routed.tier, "OAUTH");
+  });
+});
+
+describe("quota awareness & routing failover (factory-hub#80)", () => {
+  test("excludes exhausted provider from routing", async () => {
+    const { db, sqlite } = freshDb();
+    const now = Date.now();
+    sqlite.exec(`
+      INSERT INTO model_catalog (id, provider, model_name, family, category, tier, input_cost_per_1m, output_cost_per_1m, source, lifecycle, status, quality_score)
+      VALUES
+        ('codex:gpt-5', 'openai', 'gpt-5', 'openai', 'coding', 'OAUTH', 0, 0, 'oauth_device', 'qualified', 'active', 95),
+        ('claude-code:sonnet', 'anthropic', 'claude-sonnet-5', 'anthropic', 'coding', 'OAUTH', 0, 0, 'oauth_device', 'qualified', 'active', 90)
+    `);
+
+    // Initially openai has higher quality score (95 vs 90)
+    assert.equal((await resolveOptimalModel(db, "coding"))!.id, "codex:gpt-5");
+
+    // OpenAI hits quota limit
+    sqlite.exec(`
+      INSERT INTO provider_quotas (provider, status, error, exhausted_at, updated_at)
+      VALUES ('openai', 'exhausted', 'usage limit reached', ${now}, ${now})
+    `);
+
+    // Route now fails over to anthropic
+    const routed = await resolveOptimalModel(db, "coding");
+    assert.ok(routed);
+    assert.equal(routed.id, "claude-code:sonnet");
+  });
+});
+
+describe("subscription advisor (factory-hub#80)", () => {
+  test("returns insufficient_data when events or days observed are below threshold", async () => {
+    const { db } = freshDb();
+    const advisor = await getSubscriptionAdvisor(db);
+    assert.equal(advisor.status, "insufficient_data");
+    assert.match(advisor.message, /insufficient data/);
+    assert.deepEqual(advisor.recommendations, []);
+    assert.equal(advisor.dataWindow.eventsCount, 0);
+  });
+
+  test("names data window and calculates honest recommendations without invented savings", async () => {
+    const { db, sqlite } = freshDb();
+    const now = Date.now();
+    const tenDaysAgo = now - 10 * 86_400_000;
+
+    // Seed 60 usage events across 10 days for Anthropic spending $50 total
+    for (let i = 0; i < 60; i++) {
+      const ts = tenDaysAgo + i * (10 * 86_400_000 / 60);
+      sqlite.exec(`
+        INSERT INTO llm_usage_events (
+          id, pod_id, provider, model_id, tier, prompt_tokens, completion_tokens, total_tokens, cost_usd, saved_usd, latency_ms, status, created_at
+        ) VALUES ('use_${i}', 'pod_x', 'anthropic', 'claude-sonnet-5', 'PAID', 1000, 500, 1500, 0.8333, 0, 500, 'success', ${ts})
+      `);
+    }
+
+    // $50 across 10 days extrapolates to $150/mo. Anthropic subscription is $20/mo.
+    const advisor = await getSubscriptionAdvisor(db, { days: 30, minDays: 7, minEvents: 50 });
+    assert.equal(advisor.status, "active");
+    assert.equal(advisor.dataWindow.eventsCount, 60);
+    assert.ok(advisor.dataWindow.daysObserved >= 9.5);
+    assert.equal(advisor.recommendations.length, 1);
+
+    const rec = advisor.recommendations[0];
+    assert.equal(rec.family, "anthropic");
+    assert.equal(rec.subscriptionPriceUsd, 20);
+    assert.ok(rec.monthlyProjectedSpendUsd > 100);
+    assert.equal(rec.recommended, true);
+    assert.ok(rec.monthlyProjectedSavingsUsd > 80);
+    assert.match(rec.reason, /exceeds subscription price/);
   });
 });

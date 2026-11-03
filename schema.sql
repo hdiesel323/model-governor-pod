@@ -103,8 +103,33 @@ CREATE TABLE IF NOT EXISTS model_probes (
   prompt_tokens INTEGER,
   completion_tokens INTEGER,
   cost_usd REAL NOT NULL DEFAULT 0,
+  device TEXT,
   error TEXT,
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_probes_model ON model_probes(model_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS provider_quotas (
+  provider TEXT PRIMARY KEY,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'exhausted', 'rate_limited')),
+  error TEXT,
+  exhausted_at INTEGER,
+  resets_at INTEGER,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS subscription_prices (
+  family TEXT PRIMARY KEY,
+  provider TEXT NOT NULL,
+  monthly_price_usd REAL NOT NULL,
+  notes TEXT,
+  updated_at INTEGER NOT NULL
+);
+
+INSERT OR IGNORE INTO subscription_prices (family, provider, monthly_price_usd, notes, updated_at) VALUES
+  ('anthropic', 'anthropic', 20.00, 'Claude Code / Pro subscription', 1793696000000),
+  ('openai', 'openai', 20.00, 'ChatGPT Plus / Codex subscription', 1793696000000),
+  ('google', 'google', 20.00, 'Google One AI Premium / Antigravity', 1793696000000),
+  ('xai', 'xai', 20.00, 'xAI Grok Premium', 1793696000000),
+  ('zai', 'zai', 15.00, 'Zhipu GLM coding subscription', 1793696000000);
 
