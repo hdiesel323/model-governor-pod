@@ -27,6 +27,10 @@
       "*/5 * * * *"
     ]
   },
+  "vars": {
+    // HD decision 2026-11-03: up to $10/day for probing PAID models (factory-hub#78). Free models are always probed.
+    "PROBE_BUDGET_USD_DAILY": "10"
+  },
   "observability": {
     "enabled": true
   }
