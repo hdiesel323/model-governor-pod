@@ -60,7 +60,7 @@ export interface ProbeTarget {
 
 export interface ProbeResult {
   modelId: string; passed: number; total: number; latencyMs: number | null; tokensPerSec: number | null;
-  promptTokens: number; completionTokens: number; costUsd: number; error?: string; providerError?: boolean;
+  promptTokens: number; completionTokens: number; costUsd: number; device?: string; error?: string; providerError?: boolean;
 }
 
 function endpoint(provider: string, env: ProbeEnv): { url: string; key?: string } {
@@ -130,6 +130,13 @@ export async function recordProbe(db: D1Database, target: ProbeTarget, r: ProbeR
       r.tokensPerSec, r.promptTokens, r.completionTokens, r.costUsd, r.error ?? null, now)
     .run();
   if (r.providerError) {
+    if (/HTTP 402/.test(r.error ?? "")) {
+      // Account-level: no credit. Pause every paid probe for 24 h instead of retrying model after model.
+      await db.prepare(`INSERT INTO pod_info (key, value_json, updated_at) VALUES ('paid_probes_paused_until', ?, ?)
+        ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at`)
+        .bind(JSON.stringify({ until: now + 86_400_000, reason: "HTTP 402 insufficient credits", provider: target.provider }), now).run();
+      return "provider_error";
+    }
     if (/HTTP 429/.test(r.error ?? "")) await db.prepare("UPDATE model_catalog SET status = 'rate_limited', last_benchmarked_at = ? WHERE id = ?").bind(now, target.id).run();
     // 401/403/404: this account cannot use the model; park it for a day instead of re-probing every tick.
     else if (/HTTP 40[134]/.test(r.error ?? "")) await db.prepare("UPDATE model_catalog SET status = 'degraded', last_benchmarked_at = ? WHERE id = ?").bind(now, target.id).run();
@@ -154,7 +161,7 @@ export async function recordProbe(db: D1Database, target: ProbeTarget, r: ProbeR
   return lifecycle;
 }
 
-export interface ProbeCycleReport { probed: { id: string; passed: number; total: number; costUsd: number; lifecycle: string; error?: string }[]; skippedPaid: string[]; budget: number; spentBefore: number }
+export interface ProbeCycleReport { probed: { id: string; passed: number; total: number; costUsd: number; lifecycle: string; error?: string }[]; skippedPaid: string[]; budget: number; spentBefore: number; paidPausedUntil?: number }
 
 /** One cron cycle: a few free candidates (least probed, newest first) plus paid ones only within today's budget. */
 export async function runProbeCycle(db: D1Database, env: ProbeEnv & { PROBE_BUDGET_USD_DAILY?: string }, fetcher?: Fetcher, now = Date.now(), maxFree = 3): Promise<ProbeCycleReport> {
@@ -171,9 +178,12 @@ export async function runProbeCycle(db: D1Database, env: ProbeEnv & { PROBE_BUDG
       AND status = 'active' AND (probe_runs < 3 OR approved_by IS NOT NULL)
       ORDER BY probe_runs ASC, model_created_at DESC LIMIT 5`).all<any>();
   let remaining = budget - spentBefore;
+  const pause = await db.prepare("SELECT value_json FROM pod_info WHERE key = 'paid_probes_paused_until'").first<{ value_json: string }>();
+  const pausedUntil = pause ? Number(JSON.parse(pause.value_json).until ?? 0) : 0;
+  if (pausedUntil > now) remaining = -1; // account out of credit: skip paid until the pause expires
   for (const t of (paid.results ?? []).map(map)) {
     const est = estimateSuiteCost(t);
-    if (budget > 0 && est !== null && est <= remaining) { targets.push(t); remaining -= est; }
+    if (budget > 0 && remaining >= 0 && est !== null && est <= remaining) { targets.push(t); remaining -= est; }
     else skippedPaid.push(t.id);
   }
   const probed: ProbeCycleReport["probed"] = [];
@@ -182,5 +192,5 @@ export async function runProbeCycle(db: D1Database, env: ProbeEnv & { PROBE_BUDG
     const lifecycle = await recordProbe(db, t, r, Date.now());
     probed.push({ id: t.id, passed: r.passed, total: r.total, costUsd: r.costUsd, lifecycle, error: r.error });
   }
-  return { probed, skippedPaid, budget, spentBefore };
+  return { probed, skippedPaid, budget, spentBefore, paidPausedUntil: pausedUntil > now ? pausedUntil : undefined };
 }
