@@ -107,7 +107,8 @@ export async function upsertDiscovered(db: D1Database, source: string, models: D
       context_window, status, lifecycle, source, first_seen_at, last_seen_at, model_created_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 'candidate', 'discovered', ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
-      tier = excluded.tier, input_cost_per_1m = excluded.input_cost_per_1m, output_cost_per_1m = excluded.output_cost_per_1m,
+      tier = excluded.tier, family = excluded.family, input_cost_per_1m = excluded.input_cost_per_1m, output_cost_per_1m = excluded.output_cost_per_1m,
+      source = 'discovered',
       context_window = excluded.context_window, last_seen_at = excluded.last_seen_at, model_created_at = excluded.model_created_at,
       lifecycle = CASE WHEN model_catalog.lifecycle = 'retired' THEN 'candidate' ELSE model_catalog.lifecycle END`);
   const batch = models.map((m) =>
