@@ -133,6 +133,27 @@ describe("probing and promotion", () => {
   });
 });
 
+describe("credit exhaustion", () => {
+  test("a 402 pauses all paid probing for 24 h; free probing continues", async () => {
+    const { db } = freshDb();
+    await runDiscovery(db, {}, fetchCatalog, Date.now());
+    const paidCalls: string[] = [];
+    const fetcher = (async (url: string, init?: RequestInit) => {
+      const model = JSON.parse(String(init?.body)).model as string;
+      if (!model.endsWith(":free")) { paidCalls.push(model); return new Response('{"error":{"message":"Insufficient credits"}}', { status: 402 }); }
+      return answering(true)(url, init);
+    }) as any;
+    const first = await runProbeCycle(db, { OPENROUTER_API_KEY: "k", PROBE_BUDGET_USD_DAILY: "10" }, fetcher, Date.now());
+    assert.ok(paidCalls.length >= 1, "paid model attempted while budget allows");
+    const before = paidCalls.length;
+    const second = await runProbeCycle(db, { OPENROUTER_API_KEY: "k", PROBE_BUDGET_USD_DAILY: "10" }, fetcher, Date.now() + 1000);
+    assert.equal(paidCalls.length, before, "no paid calls while paused");
+    assert.ok(second.paidPausedUntil && second.paidPausedUntil > Date.now());
+    assert.ok(second.probed.some((p) => p.id.endsWith(":free")), "free probing continues");
+    assert.ok(first.probed.length >= 1);
+  });
+});
+
 describe("routing", () => {
   test("only qualified models route; family exclusion holds; explicit null when none", async () => {
     const { db, sqlite } = freshDb();
