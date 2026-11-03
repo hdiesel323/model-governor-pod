@@ -17,6 +17,12 @@ export interface DynamicSkillPackage {
   instructions: string;
 }
 
+let hubAuthToken = "";
+/** Set by the worker entry point from FACTORY_HUB_TOKEN; the engine is constructed at module load. */
+export function setHubAuthToken(token: string | undefined): void {
+  hubAuthToken = token || "";
+}
+
 export class DynamicSkillEngine {
   private cache = new Map<string, DynamicSkillPackage>();
 
@@ -29,7 +35,7 @@ export class DynamicSkillEngine {
 
     try {
       const fn = this.fetcher || fetch;
-      const res = await fn(`${this.hubUrl}/api/skills/${encodeURIComponent(skillId)}`);
+      const res = await fn(`${this.hubUrl}/api/skills/${encodeURIComponent(skillId)}`, hubAuthToken ? { headers: { Authorization: `Bearer ${hubAuthToken}` } } : undefined);
       if (!res.ok) return null;
       const data = (await res.json()) as any;
       if (data && data.skill) {

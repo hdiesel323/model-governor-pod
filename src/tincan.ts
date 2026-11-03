@@ -2,6 +2,14 @@ import { PodConfig, TincanEnvelope } from "./types.js";
 
 export type CustomFetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
+/** Adds the Factory Hub bearer credential to a request init, preserving existing headers. */
+export function withHubAuth(init: RequestInit | undefined, token: string | undefined): RequestInit | undefined {
+  if (!token) return init;
+  const headers = new Headers(init?.headers);
+  headers.set("Authorization", `Bearer ${token}`);
+  return { ...init, headers };
+}
+
 export class TincanClient {
   private config: PodConfig;
   private fetcher: CustomFetcher;
@@ -19,6 +27,8 @@ export class TincanClient {
     } else {
       this.fetcher = (input, init) => fetch(input, init);
     }
+    const base = this.fetcher;
+    this.fetcher = (input, init) => base(input, withHubAuth(init, config.hubToken));
   }
 
   public async sendHeartbeat(): Promise<boolean> {

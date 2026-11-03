@@ -14,6 +14,7 @@ export function loadPodConfig(env?: Record<string, any>): PodConfig {
   const role = get("POD_ROLE", "governor");
   const lob = get("POD_DOMAIN", get("POD_LOB", "telemetry"));
   const hubUrl = get("HUB_URL", get("FACTORY_HUB_URL", "https://factory-hub.walterhudson462.workers.dev"));
+  const hubToken = get("FACTORY_HUB_TOKEN", "");
   const apiKey = get("API_KEY", "");
   const port = parseInt(get("PORT", "5100"), 10);
 
@@ -34,6 +35,7 @@ export function loadPodConfig(env?: Record<string, any>): PodConfig {
     lob,
     capabilities,
     hubUrl,
+    hubToken,
     apiKey,
     port,
   };

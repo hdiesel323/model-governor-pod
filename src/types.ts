@@ -5,6 +5,8 @@ export interface PodConfig {
   lob: string;
   capabilities: string[];
   hubUrl: string;
+  /** Bearer credential for the Factory Hub gate (FACTORY_HUB_TOKEN). */
+  hubToken?: string;
   apiKey?: string;
   port?: number;
 }

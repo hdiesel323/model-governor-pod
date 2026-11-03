@@ -1,5 +1,6 @@
 import { loadPodConfig } from "./config.js";
 import { TincanClient } from "./tincan.js";
+import { setHubAuthToken } from "./skill-engine.js";
 import { activeHandler } from "./handler.js";
 import { renderPodUiHtml } from "./ui.js";
 import { TaskRecord } from "./types.js";
@@ -13,6 +14,7 @@ interface Env {
   POD_ROLE?: string;
   POD_LOB?: string;
   FACTORY_HUB_URL?: string;
+  FACTORY_HUB_TOKEN?: string;
 }
 
 export default {
@@ -20,6 +22,7 @@ export default {
     const url = new URL(request.url);
     const method = request.method;
     const config = loadPodConfig(env as any);
+    setHubAuthToken(config.hubToken);
     const tincan = new TincanClient(config, env.FACTORY_HUB);
 
     const corsHeaders = {
@@ -233,6 +236,7 @@ export default {
   // Scheduled cron worker: runs periodic heartbeats & polls Factory Hub for tasks
   async scheduled(event: any, env: Env): Promise<void> {
     const config = loadPodConfig(env as any);
+    setHubAuthToken(config.hubToken);
     const tincan = new TincanClient(config, env.FACTORY_HUB);
 
     // 1. Send heartbeat
