@@ -285,11 +285,6 @@ export function renderPodUiHtml(
       <div style="font-size: 0.75rem; color: #94a3b8; margin-top: 2px;">Direct API spend</div>
     </div>
     <div style="background: var(--bg-panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px;">
-      <div style="font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase; font-weight: 700; letter-spacing: 0.05em;">TokenMaxxing Savings</div>
-      <div style="font-size: 1.6rem; font-weight: 800; color: #f59e0b; margin-top: 4px;">$${totalSaved.toFixed(4)}</div>
-      <div style="font-size: 0.75rem; color: #94a3b8; margin-top: 2px;">Saved vs GPT-4o baseline</div>
-    </div>
-    <div style="background: var(--bg-panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px;">
       <div style="font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase; font-weight: 700; letter-spacing: 0.05em;">Free / OAuth Ratio</div>
       <div style="font-size: 1.6rem; font-weight: 800; color: #a855f7; margin-top: 4px;">${freeRatio}%</div>
       <div style="font-size: 0.75rem; color: #94a3b8; margin-top: 2px;">Zero-cost inference volume</div>
@@ -299,39 +294,32 @@ export function renderPodUiHtml(
   <div class="grid-2">
     <!-- Model Radar Leaderboard -->
     <div class="panel">
-      <h2>Active Model Radar Leaderboard</h2>
+      <h2>Model Radar (live catalog)</h2>
       <div style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 8px;">
-        Ranked catalog of active free, OAuth, and cheap fallback models:
+        Discovered from live catalogs and measured by probes. Blank = unmeasured. Only <b>qualified</b> models are routable.
       </div>
       <div style="overflow-x: auto; max-height: 280px;">
         <table>
           <thead>
             <tr>
-              <th>Provider & Model</th>
-              <th>Tier</th>
+              <th>Model</th>
+              <th>State</th>
+              <th>Probe pass</th>
               <th>Speed</th>
-              <th>Latency</th>
-              <th>Cost / 1M</th>
+              <th>Out $ / 1M</th>
             </tr>
           </thead>
           <tbody>
-            ${(modelCatalog.length > 0 ? modelCatalog : [
-              { provider: "cerebras", modelName: "llama3.3-70b", tier: "FREE_TIER", tokensPerSec: 1400, avgLatencyMs: 120, inputCostPer1M: 0 },
-              { provider: "cloudflare_ai", modelName: "@cf/meta/llama-3.1-8b-instruct", tier: "FREE_TIER", tokensPerSec: 240, avgLatencyMs: 85, inputCostPer1M: 0 },
-              { provider: "openrouter", modelName: "google/gemini-2.0-flash-exp:free", tier: "FREE_TIER", tokensPerSec: 185, avgLatencyMs: 205, inputCostPer1M: 0 },
-              { provider: "codex", modelName: "openai-codex/gpt-5.6-luna", tier: "OAUTH", tokensPerSec: 180, avgLatencyMs: 190, inputCostPer1M: 0 },
-              { provider: "nvidia", modelName: "meta/llama-3.3-70b-instruct", tier: "FREE_TIER", tokensPerSec: 175, avgLatencyMs: 190, inputCostPer1M: 0 },
-              { provider: "fireworks", modelName: "llama-v3p3-70b-instruct", tier: "PAID", tokensPerSec: 160, avgLatencyMs: 180, inputCostPer1M: 0.90 }
-            ]).map(m => `
+            ${modelCatalog.length === 0 ? `<tr><td colspan="5" class="font-xs" style="color:#94a3b8;">No models discovered yet. Discovery runs hourly.</td></tr>` : modelCatalog.slice(0, 60).map((m: any) => `
               <tr>
                 <td class="font-xs">
-                  <div style="font-weight: 600; color: #f8fafc;">${escapeHtml(m.modelName || m.model_name)}</div>
-                  <div style="color: #64748b; font-size: 0.7rem;">${escapeHtml(m.provider)}</div>
+                  <div style="font-weight: 600; color: #f8fafc;">${escapeHtml(m.modelName)}</div>
+                  <div style="color: #64748b; font-size: 0.7rem;">${escapeHtml(m.provider)} · ${escapeHtml(m.tier)}${m.approvedBy ? " · approved" : ""}</div>
                 </td>
-                <td><span class="badge" style="background: rgba(255,255,255,0.06); color: ${m.tier === 'FREE_TIER' ? '#10b981' : m.tier === 'OAUTH' ? '#38bdf8' : '#f59e0b'};">${escapeHtml(m.tier)}</span></td>
-                <td class="mono font-xs" style="color: #10b981; font-weight: 600;">${m.tokensPerSec || m.tokens_per_sec || 0} tok/s</td>
-                <td class="mono font-xs">${m.avgLatencyMs || m.avg_latency_ms || 0}ms</td>
-                <td class="mono font-xs">$${(m.inputCostPer1M !== undefined ? m.inputCostPer1M : m.input_cost_per_1m || 0).toFixed(2)}</td>
+                <td><span class="badge" style="background: rgba(255,255,255,0.06); color: ${m.lifecycle === 'qualified' ? '#10b981' : m.lifecycle === 'candidate' ? '#f59e0b' : '#64748b'};">${escapeHtml(m.lifecycle)}</span></td>
+                <td class="mono font-xs">${m.qualityScore === null ? "—" : `${m.qualityScore}% (${m.probeRuns} runs)`}</td>
+                <td class="mono font-xs">${m.tokensPerSec === null ? "—" : `${m.tokensPerSec} tok/s`}</td>
+                <td class="mono font-xs">${m.outputCostPer1M === null ? "unknown" : `$${Number(m.outputCostPer1M).toFixed(2)}`}</td>
               </tr>
             `).join("")}
           </tbody>

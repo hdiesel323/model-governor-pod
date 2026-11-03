@@ -4,7 +4,10 @@ import { setHubAuthToken } from "./skill-engine.js";
 import { activeHandler } from "./handler.js";
 import { renderPodUiHtml } from "./ui.js";
 import { TaskRecord } from "./types.js";
-import { getModelCatalog, resolveOptimalModel, recordUsage, getTelemetryStats } from "./governor.js";
+import { getModelCatalog, resolveOptimalModel, recordUsage, getTelemetryStats, mapModel } from "./governor.js";
+import { authGate } from "./auth.js";
+import { runDiscovery } from "./discovery.js";
+import { runProbeCycle, recordProbe } from "./probe.js";
 
 interface Env {
   DB: D1Database;
@@ -15,7 +18,16 @@ interface Env {
   POD_LOB?: string;
   FACTORY_HUB_URL?: string;
   FACTORY_HUB_TOKEN?: string;
+  GOVERNOR_ADMIN_TOKEN?: string;
+  OPENROUTER_API_KEY?: string;
+  ORCAROUTER_API_KEY?: string;
+  ORCAROUTER_BASE_URL?: string;
+  /** HD-set daily ceiling for probing PAID models. Default 0: paid models are never probed automatically. */
+  PROBE_BUDGET_USD_DAILY?: string;
 }
+
+const json = (body: any, status: number, headers: Record<string, string>) =>
+  new Response(JSON.stringify(body), { status, headers: { ...headers, "Content-Type": "application/json" } });
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -33,6 +45,14 @@ export default {
 
     if (method === "OPTIONS") {
       return new Response(null, { status: 204, headers: corsHeaders });
+    }
+
+    // Auth gate (factory-hub#78): everything but /health needs a credential; admin routes need the admin token.
+    const denied = authGate(request, env);
+    if (denied) {
+      const h = new Headers(denied.headers);
+      for (const [k, v] of Object.entries(corsHeaders)) h.set(k, v);
+      return new Response(denied.body, { status: denied.status, headers: h });
     }
 
     // Health Check
@@ -74,23 +94,60 @@ export default {
       });
     }
 
-    // API: Resolve Optimal Model for Task (TokenMaxxing Route)
+    // API: Route to the best QUALIFIED model (measured by probes; paid ones approved by HD).
     if (method === "GET" && url.pathname === "/api/models/route") {
       const category = url.searchParams.get("category") || "general_reasoning";
-      const preferFree = url.searchParams.get("prefer_free") !== "false";
-      const model = await resolveOptimalModel(env.DB, category, preferFree);
-
-      if (!model) {
-        return new Response(JSON.stringify({ error: "No active model found" }), {
-          status: 404,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
-      }
-
-      return new Response(JSON.stringify({ recommendedModel: model }), {
-        status: 200,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      const maxCost = url.searchParams.get("maxOutputCostPer1M");
+      const model = await resolveOptimalModel(env.DB, category, {
+        excludeFamily: url.searchParams.get("excludeFamily") || undefined,
+        maxOutputCostPer1M: maxCost === null ? undefined : Number(maxCost),
       });
+      if (!model) return json({ recommendedModel: null, reason: `no qualified model for category ${category}` }, 404, corsHeaders);
+      return json({ recommendedModel: model }, 200, corsHeaders);
+    }
+
+    // API: Probe history for one model (read-only).
+    if (method === "GET" && url.pathname === "/api/governor/probes") {
+      const model = url.searchParams.get("model");
+      const rows = await env.DB.prepare(`SELECT * FROM model_probes ${model ? "WHERE model_id = ?" : ""} ORDER BY created_at DESC LIMIT 100`)
+        .bind(...(model ? [model] : [])).all<any>();
+      return json({ probes: rows.results ?? [] }, 200, corsHeaders);
+    }
+
+    // ADMIN: approve / revoke a model for routing. Paid models never qualify without this (ruling #1).
+    const adminModel = url.pathname.match(/^\/api\/models\/(.+)\/(approve|revoke)$/);
+    if (method === "POST" && adminModel) {
+      const id = decodeURIComponent(adminModel[1]);
+      const row = await env.DB.prepare("SELECT * FROM model_catalog WHERE id = ?").bind(id).first<any>();
+      if (!row) return json({ error: `unknown model ${id}` }, 404, corsHeaders);
+      if (adminModel[2] === "approve") {
+        const body = (await request.json().catch(() => ({}))) as any;
+        await env.DB.prepare("UPDATE model_catalog SET approved_by = ?, approved_at = ? WHERE id = ?")
+          .bind(String(body.by || "hd"), Date.now(), id).run();
+      } else {
+        await env.DB.prepare("UPDATE model_catalog SET approved_by = NULL, approved_at = NULL, lifecycle = CASE WHEN tier = 'PAID' AND lifecycle = 'qualified' THEN 'candidate' ELSE lifecycle END WHERE id = ?")
+          .bind(id).run();
+      }
+      const updated = await env.DB.prepare("SELECT * FROM model_catalog WHERE id = ?").bind(id).first<any>();
+      return json({ model: mapModel(updated) }, 200, corsHeaders);
+    }
+
+    // ADMIN: run discovery or one probe cycle now.
+    if (method === "POST" && url.pathname === "/api/governor/discover") {
+      return json({ discovery: await runDiscovery(env.DB, env) }, 200, corsHeaders);
+    }
+    if (method === "POST" && url.pathname === "/api/governor/probe") {
+      const body = (await request.json().catch(() => ({}))) as any;
+      if (body.model) {
+        const row = await env.DB.prepare("SELECT * FROM model_catalog WHERE id = ?").bind(String(body.model)).first<any>();
+        if (!row) return json({ error: "unknown model" }, 404, corsHeaders);
+        if (row.tier !== "FREE_TIER" && !row.approved_by) return json({ error: "paid model: approve it first (spend gate)" }, 409, corsHeaders);
+        const { probeModel } = await import("./probe.js");
+        const target = { id: row.id, provider: row.provider, modelName: row.model_name, tier: row.tier, inputCostPer1M: row.input_cost_per_1m, outputCostPer1M: row.output_cost_per_1m };
+        const r = await probeModel(target, env);
+        return json({ probe: r, lifecycle: await recordProbe(env.DB, target, r, Date.now()) }, 200, corsHeaders);
+      }
+      return json({ cycle: await runProbeCycle(env.DB, env) }, 200, corsHeaders);
     }
 
     // API: Record LLM Usage Telemetry
@@ -170,6 +227,8 @@ export default {
           const result = await activeHandler.handle(taskRecord, {
             podConfig: config,
             now,
+            db: env.DB,
+            env: env as any,
             publishEvent: async (evTopic, toPod, payload) => {
               await tincan.publish(evTopic, toPod, payload);
               await logMessage(env.DB, "outbound", evTopic, config.id, toPod, payload);
@@ -242,6 +301,20 @@ export default {
     // 1. Send heartbeat
     await tincan.sendHeartbeat();
 
+    // 1b. Model radar (factory-hub#78): discovery hourly (or when nothing is discovered yet), probes every tick.
+    try {
+      const discovered = await env.DB.prepare("SELECT COUNT(*) n FROM model_catalog WHERE source = 'discovered'").first<{ n: number }>();
+      if (new Date().getUTCMinutes() < 5 || !discovered?.n) {
+        const reports = await runDiscovery(env.DB, env);
+        const newIds = reports.flatMap((r) => r.newIds);
+        if (newIds.length) await tincan.publish("model.discovered", "pod:pm", { count: newIds.length, ids: newIds.slice(0, 50), reports: reports.map((r) => ({ ...r, newIds: undefined })) });
+      }
+      const cycle = await runProbeCycle(env.DB, env);
+      console.log(`[governor] probe cycle: ${cycle.probed.length} probed, ${cycle.skippedPaid.length} paid skipped (budget $${cycle.budget})`);
+    } catch (err: any) {
+      console.error("[governor] radar error:", err?.message || err);
+    }
+
     // 2. Poll for pending tasks assigned to this pod
     const messages = await tincan.pollInbox(5);
     for (const msg of messages) {
@@ -273,6 +346,8 @@ export default {
           const result = await activeHandler.handle(taskRecord, {
             podConfig: config,
             now,
+            db: env.DB,
+            env: env as any,
             publishEvent: async (evTopic, toPod, pl) => {
               await tincan.publish(evTopic, toPod, pl);
             },

@@ -22,7 +22,7 @@ describe("Autonomous Worker Pod Chassis Test Suite", () => {
     assert.deepEqual(config.capabilities, ["data_processing", "stream_filtering"]);
   });
 
-  test("2. DefaultPodHandler executes task and reports progress", async () => {
+  test("2. Governor handler refuses to answer without storage (no fabricated fallback, factory-hub#78)", async () => {
     const handler = new DefaultPodHandler();
     const config = loadPodConfig();
     let publishedTopic = "";
@@ -38,17 +38,17 @@ describe("Autonomous Worker Pod Chassis Test Suite", () => {
       updatedAt: Date.now(),
     };
 
-    const res = await handler.handle(task, {
-      podConfig: config,
-      now: Date.now(),
-      publishEvent: async (topic, toPod, payload) => {
-        publishedTopic = topic;
-      },
-    });
-
-    assert.equal(res.taskId, "task_test_101");
-    assert.equal(res.role, config.role);
-    assert.equal(publishedTopic, "task.completed");
+    await assert.rejects(
+      handler.handle(task, {
+        podConfig: config,
+        now: Date.now(),
+        publishEvent: async (topic) => {
+          publishedTopic = topic;
+        },
+      }),
+      /needs D1/,
+    );
+    assert.equal(publishedTopic, "", "nothing published without real data");
   });
 
   test("3. renderPodUiHtml produces valid cockpit markup", () => {
