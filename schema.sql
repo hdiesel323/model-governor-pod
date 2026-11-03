@@ -85,7 +85,8 @@ CREATE TABLE IF NOT EXISTS model_catalog (
   probe_runs INTEGER NOT NULL DEFAULT 0,
   probe_passes INTEGER NOT NULL DEFAULT 0,
   approved_by TEXT,
-  approved_at INTEGER
+  approved_at INTEGER,
+  model_created_at INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_catalog_route ON model_catalog(category, lifecycle);

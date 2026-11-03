@@ -18,6 +18,17 @@ export interface DiscoveredModel {
   createdAt: number | null;
 }
 
+/** Not a chat model we can probe: routers, batch-API variants, non-text in/out (music, image, embeddings). */
+export function excludedReason(m: any): string | null {
+  const id = String(m?.id ?? "");
+  if (id.startsWith("openrouter/")) return "router";
+  if (id.endsWith(":batch")) return "batch-variant";
+  const out: string[] = m?.architecture?.output_modalities ?? ["text"];
+  const inp: string[] = m?.architecture?.input_modalities ?? ["text"];
+  if (!out.includes("text") || !inp.includes("text")) return "not-text-chat";
+  return null;
+}
+
 const RETIRE_AFTER_MS = 7 * 24 * 3600 * 1000;
 
 export function familyOf(modelName: string): string {
@@ -33,6 +44,7 @@ export function categorize(modelName: string): "general_reasoning" | "coding" {
 /** Maps one OpenRouter model record; returns null for routers/negative-priced pseudo models. */
 export function fromOpenRouter(m: any): DiscoveredModel | null {
   if (!m?.id || typeof m.id !== "string") return null;
+  if (excludedReason(m)) return null;
   const p = Number(m.pricing?.prompt);
   const c = Number(m.pricing?.completion);
   if (!Number.isFinite(p) || !Number.isFinite(c) || p < 0 || c < 0) return null;
@@ -92,15 +104,15 @@ export async function upsertDiscovered(db: D1Database, source: string, models: D
   const known = new Set((existing.results ?? []).map((r) => r.id));
   const stmt = db.prepare(`
     INSERT INTO model_catalog (id, provider, model_name, family, category, tier, input_cost_per_1m, output_cost_per_1m,
-      context_window, status, lifecycle, source, first_seen_at, last_seen_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 'candidate', 'discovered', ?, ?)
+      context_window, status, lifecycle, source, first_seen_at, last_seen_at, model_created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 'candidate', 'discovered', ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       tier = excluded.tier, input_cost_per_1m = excluded.input_cost_per_1m, output_cost_per_1m = excluded.output_cost_per_1m,
-      context_window = excluded.context_window, last_seen_at = excluded.last_seen_at,
+      context_window = excluded.context_window, last_seen_at = excluded.last_seen_at, model_created_at = excluded.model_created_at,
       lifecycle = CASE WHEN model_catalog.lifecycle = 'retired' THEN 'candidate' ELSE model_catalog.lifecycle END`);
   const batch = models.map((m) =>
     stmt.bind(m.id, m.provider, m.modelName, m.family, m.category, m.tier, m.inputCostPer1M, m.outputCostPer1M,
-      m.contextWindow, now, now),
+      m.contextWindow, now, now, m.createdAt),
   );
   for (let i = 0; i < batch.length; i += 50) await db.batch(batch.slice(i, i + 50));
   const retired = await db

@@ -34,6 +34,8 @@ const orModels = {
     { id: "acme/free-coder:free", context_length: 131072, created: 1793000000, pricing: { prompt: "0", completion: "0" } },
     { id: "anthropic/claude-x", context_length: 200000, created: 1793000000, pricing: { prompt: "0.000003", completion: "0.000015" } },
     { id: "openrouter/auto", pricing: { prompt: "-1", completion: "-1" } },
+    { id: "google/lyria-3-pro-preview", pricing: { prompt: "0", completion: "0" }, architecture: { input_modalities: ["text"], output_modalities: ["audio"] } },
+    { id: "openai/gpt-x:batch", pricing: { prompt: "0.000001", completion: "0.000002" } },
   ],
 };
 const fetchCatalog = async () => new Response(JSON.stringify(orModels), { status: 200 });
@@ -58,6 +60,8 @@ describe("discovery", () => {
     assert.equal(m.outputCostPer1M, 15);
     assert.equal(fromOpenRouter(orModels.data[0])!.tier, "FREE_TIER");
     assert.equal(fromOpenRouter(orModels.data[2]), null);
+    assert.equal(fromOpenRouter(orModels.data[3]), null, "music model is not a chat model");
+    assert.equal(fromOpenRouter(orModels.data[4]), null, "batch variants are skipped");
     assert.equal(familyOf("meta-llama/llama-4"), "meta");
   });
 
