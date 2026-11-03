@@ -10,16 +10,25 @@ export interface ModelEntry {
   id: string;
   provider: string;
   modelName: string;
+  family: string | null;
   category: "fast_classification" | "general_reasoning" | "deep_audit" | "coding";
   tier: "FREE_TIER" | "OAUTH" | "PAID";
-  inputCostPer1M: number;
-  outputCostPer1M: number;
-  contextWindow: number;
-  avgLatencyMs: number;
-  tokensPerSec: number;
-  qualityScore: number;
+  inputCostPer1M: number | null;
+  outputCostPer1M: number | null;
+  contextWindow: number | null;
+  /** Measured by probes; null = unmeasured. Never hand-typed (factory-hub#78). */
+  avgLatencyMs: number | null;
+  tokensPerSec: number | null;
+  /** Probe pass rate in percent over the fixed smoke suite; null = unmeasured. Not a general quality claim. */
+  qualityScore: number | null;
   status: "active" | "degraded" | "rate_limited";
-  lastBenchmarkedAt: number;
+  lastBenchmarkedAt: number | null;
+  lifecycle: "candidate" | "qualified" | "retired";
+  source: string;
+  firstSeenAt: number | null;
+  lastSeenAt: number | null;
+  probeRuns: number;
+  approvedBy: string | null;
 }
 
 export interface LlmUsageEvent {
@@ -39,71 +48,79 @@ export interface LlmUsageEvent {
   createdAt: number;
 }
 
-// Baseline cost for comparison (e.g. GPT-4o @ $5.00/1M tokens avg)
-const BASELINE_COST_PER_TOKEN = 0.000005;
 
-export async function getModelCatalog(db: D1Database): Promise<ModelEntry[]> {
-  const { results } = await db
-    .prepare("SELECT * FROM model_catalog ORDER BY quality_score DESC")
-    .all<any>();
-
-  return (results || []).map((r) => ({
+export function mapModel(r: any): ModelEntry {
+  return {
     id: r.id,
     provider: r.provider,
     modelName: r.model_name,
+    family: r.family ?? null,
     category: r.category,
     tier: r.tier,
-    inputCostPer1M: r.input_cost_per_1m,
-    outputCostPer1M: r.output_cost_per_1m,
-    contextWindow: r.context_window,
-    avgLatencyMs: r.avg_latency_ms,
-    tokensPerSec: r.tokens_per_sec,
-    qualityScore: r.quality_score,
+    inputCostPer1M: r.input_cost_per_1m ?? null,
+    outputCostPer1M: r.output_cost_per_1m ?? null,
+    contextWindow: r.context_window ?? null,
+    avgLatencyMs: r.avg_latency_ms ?? null,
+    tokensPerSec: r.tokens_per_sec ?? null,
+    qualityScore: r.quality_score ?? null,
     status: r.status,
-    lastBenchmarkedAt: r.last_benchmarked_at,
-  }));
+    lastBenchmarkedAt: r.last_benchmarked_at ?? null,
+    lifecycle: r.lifecycle ?? "candidate",
+    source: r.source ?? "unknown",
+    firstSeenAt: r.first_seen_at ?? null,
+    lastSeenAt: r.last_seen_at ?? null,
+    probeRuns: r.probe_runs ?? 0,
+    approvedBy: r.approved_by ?? null,
+  };
 }
 
+/** Qualified first, then measured candidates, newest discoveries first. Retired models are excluded unless asked. */
+export async function getModelCatalog(db: D1Database, opts: { includeRetired?: boolean; limit?: number } = {}): Promise<ModelEntry[]> {
+  const { results } = await db
+    .prepare(`SELECT * FROM model_catalog ${opts.includeRetired ? "" : "WHERE lifecycle != 'retired'"}
+      ORDER BY CASE lifecycle WHEN 'qualified' THEN 0 WHEN 'candidate' THEN 1 ELSE 2 END,
+        quality_score IS NULL, quality_score DESC, first_seen_at DESC LIMIT ?`)
+    .bind(opts.limit ?? 500)
+    .all<any>();
+  return (results || []).map(mapModel);
+}
+
+export interface RouteOptions {
+  /** Never return this family (e.g. the auditor's), so review stays cross-family. Comma-separated allowed. */
+  excludeFamily?: string;
+  /** Upper bound on output price per 1M tokens; unknown prices never pass a bound. */
+  maxOutputCostPer1M?: number;
+}
+
+/**
+ * Only QUALIFIED models are routable (measured by probes; paid ones also approved by HD).
+ * fast_classification: fastest measured. Everything else, including coding: highest probe pass rate,
+ * then cheapest, then fastest. Returns null when nothing qualifies: callers must handle that explicitly.
+ */
 export async function resolveOptimalModel(
   db: D1Database,
   category: string = "general_reasoning",
-  preferFree: boolean = true
+  opts: RouteOptions = {}
 ): Promise<ModelEntry | null> {
-  let query = "SELECT * FROM model_catalog WHERE status = 'active'";
+  const where = ["lifecycle = 'qualified'", "status = 'active'"];
   const params: any[] = [];
-
-  if (category) {
-    query += " AND category = ?";
-    params.push(category);
+  const excluded = (opts.excludeFamily || "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+  if (excluded.length) {
+    where.push(`(family IS NULL OR family NOT IN (${excluded.map(() => "?").join(",")}))`);
+    params.push(...excluded);
   }
-
-  if (preferFree) {
-    // Sort Free/OAuth models first, then by tokens/sec descending
-    query += " ORDER BY CASE WHEN tier IN ('FREE_TIER', 'OAUTH') THEN 0 ELSE 1 END ASC, tokens_per_sec DESC";
-  } else {
-    query += " ORDER BY quality_score DESC";
+  if (opts.maxOutputCostPer1M !== undefined) {
+    where.push("output_cost_per_1m IS NOT NULL AND output_cost_per_1m <= ?");
+    params.push(opts.maxOutputCostPer1M);
   }
-
-  query += " LIMIT 1";
-
-  const row = await db.prepare(query).bind(...params).first<any>();
-  if (!row) return null;
-
-  return {
-    id: row.id,
-    provider: row.provider,
-    modelName: row.model_name,
-    category: row.category,
-    tier: row.tier,
-    inputCostPer1M: row.input_cost_per_1m,
-    outputCostPer1M: row.output_cost_per_1m,
-    contextWindow: row.context_window,
-    avgLatencyMs: row.avg_latency_ms,
-    tokensPerSec: row.tokens_per_sec,
-    qualityScore: row.quality_score,
-    status: row.status,
-    lastBenchmarkedAt: row.last_benchmarked_at,
-  };
+  const order = category === "fast_classification"
+    ? "tokens_per_sec DESC, quality_score DESC"
+    : "quality_score DESC, COALESCE(output_cost_per_1m, 1e9) ASC, tokens_per_sec DESC";
+  const row = await db
+    .prepare(`SELECT * FROM model_catalog WHERE ${where.join(" AND ")} ORDER BY ${order} LIMIT 1`)
+    .bind(...params)
+    .first<any>();
+  return row ? mapModel(row) : null;
 }
 
 export async function recordUsage(
@@ -139,9 +156,8 @@ export async function recordUsage(
     costUsd = inputCost + outputCost;
   }
 
-  // TokenMaxxing Savings Calculation: What would this have cost on flagship GPT-4o?
-  const baselineCost = totalTokens * BASELINE_COST_PER_TOKEN;
-  const savedUsd = Math.max(0, baselineCost - costUsd);
+  // No counterfactual "savings": the old GPT-4o-2024 baseline was an invented comparison (factory-hub#78).
+  const savedUsd = 0;
 
   const event: LlmUsageEvent = {
     id,

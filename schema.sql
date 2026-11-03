@@ -62,45 +62,48 @@ CREATE INDEX IF NOT EXISTS idx_usage_pod ON llm_usage_events(pod_id);
 CREATE INDEX IF NOT EXISTS idx_usage_tier ON llm_usage_events(tier);
 CREATE INDEX IF NOT EXISTS idx_usage_created ON llm_usage_events(created_at DESC);
 
+-- factory-hub#78: no hand-typed seed. The catalog is filled by live discovery and measured by probes.
 CREATE TABLE IF NOT EXISTS model_catalog (
   id TEXT PRIMARY KEY,
   provider TEXT NOT NULL,
   model_name TEXT NOT NULL,
+  family TEXT,
   category TEXT NOT NULL CHECK (category IN ('fast_classification', 'general_reasoning', 'deep_audit', 'coding')),
   tier TEXT NOT NULL CHECK (tier IN ('FREE_TIER', 'OAUTH', 'PAID')),
-  input_cost_per_1m REAL NOT NULL,
-  output_cost_per_1m REAL NOT NULL,
-  context_window INTEGER NOT NULL,
-  avg_latency_ms INTEGER NOT NULL,
-  tokens_per_sec INTEGER NOT NULL,
-  quality_score REAL NOT NULL,
+  input_cost_per_1m REAL,
+  output_cost_per_1m REAL,
+  context_window INTEGER,
+  avg_latency_ms INTEGER,
+  tokens_per_sec INTEGER,
+  quality_score REAL,
   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'degraded', 'rate_limited')),
-  last_benchmarked_at INTEGER NOT NULL
+  last_benchmarked_at INTEGER,
+  lifecycle TEXT NOT NULL DEFAULT 'candidate' CHECK (lifecycle IN ('candidate', 'qualified', 'retired')),
+  source TEXT NOT NULL DEFAULT 'discovered',
+  first_seen_at INTEGER,
+  last_seen_at INTEGER,
+  probe_runs INTEGER NOT NULL DEFAULT 0,
+  probe_passes INTEGER NOT NULL DEFAULT 0,
+  approved_by TEXT,
+  approved_at INTEGER
 );
 
--- Seed High-Priority Free & TokenMaxxed Models across all integrated providers
-INSERT OR IGNORE INTO model_catalog (
-  id, provider, model_name, category, tier, input_cost_per_1m, output_cost_per_1m, context_window, avg_latency_ms, tokens_per_sec, quality_score, status, last_benchmarked_at
-) VALUES
-  -- Tier 0: 100% Free / Cloudflare Native / Developer Free Tiers
-  ('cf-llama-3-1-8b', 'cloudflare_ai', '@cf/meta/llama-3.1-8b-instruct', 'fast_classification', 'FREE_TIER', 0.00, 0.00, 131072, 85, 240, 88.5, 'active', 1730500000000),
-  ('cerebras-llama-3-3-70b', 'cerebras', 'llama3.3-70b', 'general_reasoning', 'FREE_TIER', 0.00, 0.00, 131072, 120, 1400, 94.0, 'active', 1730500000000),
-  ('cerebras-gpt-oss-120b', 'cerebras', 'gpt-oss-120b', 'general_reasoning', 'FREE_TIER', 0.00, 0.00, 131072, 140, 1100, 95.0, 'active', 1730500000000),
-  ('openrouter-gemini-flash-free', 'openrouter', 'google/gemini-2.0-flash-exp:free', 'general_reasoning', 'FREE_TIER', 0.00, 0.00, 1048576, 210, 180, 92.5, 'active', 1730500000000),
-  ('openrouter-deepseek-r1-free', 'openrouter', 'deepseek/deepseek-r1:free', 'deep_audit', 'FREE_TIER', 0.00, 0.00, 65536, 450, 95, 96.0, 'active', 1730500000000),
-  ('openrouter-llama-3-3-free', 'openrouter', 'meta-llama/llama-3.3-70b-instruct:free', 'general_reasoning', 'FREE_TIER', 0.00, 0.00, 131072, 230, 140, 93.5, 'active', 1730500000000),
-  ('nvidia-llama-3-3-70b', 'nvidia', 'meta/llama-3.3-70b-instruct', 'general_reasoning', 'FREE_TIER', 0.00, 0.00, 131072, 190, 175, 94.0, 'active', 1730500000000),
-  ('nvidia-minimax-m3', 'nvidia', 'nvidia/minimax-m3', 'general_reasoning', 'FREE_TIER', 0.00, 0.00, 1000000, 310, 130, 91.0, 'active', 1730500000000),
+CREATE INDEX IF NOT EXISTS idx_catalog_route ON model_catalog(category, lifecycle);
 
-  -- Tier 0.5: OAuth & Subscription-Covered Models ($0 Marginal API Cost)
-  ('orcarouter-auto', 'orcarouter', 'orcarouter/auto', 'general_reasoning', 'OAUTH', 0.00, 0.00, 131072, 160, 220, 94.0, 'active', 1730500000000),
-  ('codex-gpt-5-6-luna', 'codex', 'openai-codex/gpt-5.6-luna', 'coding', 'OAUTH', 0.00, 0.00, 128000, 190, 180, 93.0, 'active', 1730500000000),
-  ('codex-gpt-5-5', 'codex', 'openai-codex/gpt-5.5', 'coding', 'OAUTH', 0.00, 0.00, 128000, 250, 140, 95.5, 'active', 1730500000000),
-  ('codex-gpt-5-6-sol', 'codex', 'openai-codex/gpt-5.6-sol', 'deep_audit', 'OAUTH', 0.00, 0.00, 200000, 380, 110, 97.5, 'active', 1730500000000),
+CREATE TABLE IF NOT EXISTS model_probes (
+  id TEXT PRIMARY KEY,
+  model_id TEXT NOT NULL,
+  suite_version TEXT NOT NULL,
+  passed INTEGER NOT NULL,
+  total INTEGER NOT NULL,
+  latency_ms INTEGER,
+  ttft_ms INTEGER,
+  tokens_per_sec REAL,
+  prompt_tokens INTEGER,
+  completion_tokens INTEGER,
+  cost_usd REAL NOT NULL DEFAULT 0,
+  error TEXT,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_probes_model ON model_probes(model_id, created_at DESC);
 
-  -- Tier 1: Ultra-Low-Cost Fallback (Fractional Cents)
-  ('fireworks-llama-3-3-70b', 'fireworks', 'accounts/fireworks/models/llama-v3p3-70b-instruct', 'general_reasoning', 'PAID', 0.90, 0.90, 131072, 180, 160, 94.5, 'active', 1730500000000),
-  ('fireworks-gpt-oss-120b', 'fireworks', 'fireworks/gpt-oss-120b', 'general_reasoning', 'PAID', 1.20, 1.20, 131072, 220, 130, 95.0, 'active', 1730500000000),
-
-  -- Tier 2: Strictly Gated Flagship (Reserved for Critical Red Team Consensus)
-  ('anthropic-claude-3-5-sonnet', 'anthropic', 'claude-3-5-sonnet-20241022', 'deep_audit', 'PAID', 3.00, 15.00, 200000, 850, 75, 99.0, 'active', 1730500000000);

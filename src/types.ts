@@ -30,6 +30,9 @@ export interface HandlerContext {
   podConfig: PodConfig;
   now: number;
   publishEvent: (topic: string, toPod: string, payload: any) => Promise<void>;
+  /** Pod storage and secrets, when the runtime provides them (edge Worker). */
+  db?: D1Database;
+  env?: Record<string, any>;
 }
 
 export interface TaskHandler<TSpec = any, TResult = any> {
