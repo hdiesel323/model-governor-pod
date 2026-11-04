@@ -133,6 +133,19 @@ describe("probing and promotion", () => {
   });
 });
 
+describe("re-applied migration resilience", () => {
+  test("discovery restores family and provenance on existing rows (excludeFamily must never see NULL)", async () => {
+    const { db, sqlite } = freshDb();
+    await runDiscovery(db, {}, fetchCatalog, Date.now());
+    sqlite.exec(`UPDATE model_catalog SET family = NULL, source = 'seed-2024' WHERE id = 'openrouter:anthropic/claude-x'`);
+    await runDiscovery(db, {}, fetchCatalog, Date.now() + 1000);
+    const row = sqlite.prepare("SELECT family, source, lifecycle FROM model_catalog WHERE id = 'openrouter:anthropic/claude-x'").get() as any;
+    assert.equal(row.family, "anthropic");
+    assert.equal(row.source, "discovered");
+    assert.notEqual(row.lifecycle, "retired", "a live model is never retired as a superseded seed");
+  });
+});
+
 describe("credit exhaustion", () => {
   test("a 402 pauses all paid probing for 24 h; free probing continues", async () => {
     const { db } = freshDb();

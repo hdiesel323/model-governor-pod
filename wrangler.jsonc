@@ -10,7 +10,8 @@
     {
       "binding": "DB",
       "database_name": "model-governor-pod-db",
-      "database_id": "2c475965-3e8a-4d0c-b0dc-389283ca8634"
+      "database_id": "2c475965-3e8a-4d0c-b0dc-389283ca8634",
+      "migrations_dir": "migrations"
     }
   ],
   "services": [
