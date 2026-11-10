@@ -109,3 +109,23 @@ describe("proxy", () => {
     assert.deepEqual(ids, ["auto", "auto-coding", "auto-fast", "openrouter:acme/best:free", "orcarouter:acme/second"]);
   });
 });
+
+describe("provider rate limits", () => {
+  test("a fresh rate limit blocks the provider; an old one without a reset time no longer does", async () => {
+    const sqlite = new DatabaseSync(":memory:");
+    sqlite.exec(readFileSync(decodeURIComponent(new URL("../schema.sql", import.meta.url).pathname), "utf8"));
+    sqlite.prepare(`INSERT INTO model_catalog (id, provider, model_name, category, tier, lifecycle, status, quality_score)
+      VALUES ('openrouter:a/b:free', 'openrouter', 'a/b:free', 'general_reasoning', 'FREE_TIER', 'qualified', 'active', 100)`).run();
+    const DB = d1(sqlite);
+    const limited = (updatedAt: number) => {
+      sqlite.exec("DELETE FROM provider_quotas");
+      sqlite.prepare(`INSERT INTO provider_quotas (provider, status, error, exhausted_at, resets_at, updated_at)
+        VALUES ('openrouter', 'rate_limited', 'HTTP 429', ?, NULL, ?)`).run(updatedAt, updatedAt);
+    };
+    const call = () => chatCompletions(chat({ model: "auto" }), { DB, OPENROUTER_API_KEY: "k" }, {}, "pod", async () => ok("x"));
+    limited(Date.now());
+    assert.equal((await call()).status, 503, "just rate limited: provider skipped");
+    limited(Date.now() - 16 * 60_000);
+    assert.equal((await call()).status, 200, "stale rate limit expired: provider routed again");
+  });
+});
