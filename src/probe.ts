@@ -4,6 +4,10 @@
 // (set by HD; default 0 = never), and spend is computed from catalog prices and recorded per probe.
 
 import type { Fetcher } from "./discovery.js";
+import { RATE_LIMIT_WINDOW_MS } from "./governor.js";
+
+/** Providers that front many upstream models, each with its own rate limit. */
+const AGGREGATORS = new Set(["openrouter", "orcarouter"]);
 
 export const SUITE_VERSION = "smoke-2026-11-v1";
 const MAX_TOKENS = 2000; // generous: reasoning models must not exhaust the budget before answering (see #76)
@@ -139,9 +143,11 @@ export async function recordProbe(db: D1Database, target: ProbeTarget, r: ProbeR
     }
     if (/HTTP 429|rate[- ]limit|quota/i.test(r.error ?? "")) {
       await db.prepare("UPDATE model_catalog SET status = 'rate_limited', last_benchmarked_at = ? WHERE id = ?").bind(now, target.id).run();
-      await db.prepare(`INSERT INTO provider_quotas (provider, status, error, exhausted_at, updated_at) VALUES (?, 'rate_limited', ?, ?, ?)
-        ON CONFLICT(provider) DO UPDATE SET status = 'rate_limited', error = excluded.error, updated_at = excluded.updated_at`)
-        .bind(target.provider, r.error ?? "rate limited", now, now).run().catch(() => {});
+      // On an aggregator a 429 is one upstream model's limit, not the account's: the model is parked above,
+      // and the provider stays routable. A direct provider's 429 is account-wide, so it pauses the provider.
+      if (!AGGREGATORS.has(target.provider)) await db.prepare(`INSERT INTO provider_quotas (provider, status, error, exhausted_at, resets_at, updated_at) VALUES (?, 'rate_limited', ?, ?, ?, ?)
+        ON CONFLICT(provider) DO UPDATE SET status = 'rate_limited', error = excluded.error, resets_at = excluded.resets_at, updated_at = excluded.updated_at`)
+        .bind(target.provider, r.error ?? "rate limited", now, now + RATE_LIMIT_WINDOW_MS, now).run().catch(() => {});
     }
     // 401/403/404 or quota/usage limit: park or mark exhausted
     else if (/HTTP 40[134]|usage limit|unsupported/i.test(r.error ?? "")) {
@@ -154,6 +160,8 @@ export async function recordProbe(db: D1Database, target: ProbeTarget, r: ProbeR
     }
     return "provider_error";
   }
+  // The provider answered: any rate limit on it is over.
+  await db.prepare("DELETE FROM provider_quotas WHERE provider = ? AND status = 'rate_limited'").bind(target.provider).run().catch(() => {});
   const agg = await db.prepare(`SELECT COUNT(*) runs, SUM(passed) passed, SUM(total) total, AVG(latency_ms) lat, AVG(tokens_per_sec) tps
       FROM model_probes WHERE model_id = ? AND error IS NULL AND suite_version = ?`).bind(target.id, SUITE_VERSION).first<any>();
   const recent = await db.prepare(`SELECT SUM(passed) * 1.0 / SUM(total) rate FROM (SELECT passed, total FROM model_probes
