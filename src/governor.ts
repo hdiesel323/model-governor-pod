@@ -90,6 +90,8 @@ export interface RouteOptions {
   excludeFamily?: string;
   /** Upper bound on output price per 1M tokens; unknown prices never pass a bound. */
   maxOutputCostPer1M?: number;
+  /** Only these providers (e.g. the ones the caller holds keys for). Empty or absent: any. */
+  providers?: string[];
 }
 
 /**
@@ -102,6 +104,16 @@ export async function resolveOptimalModel(
   category: string = "general_reasoning",
   opts: RouteOptions = {}
 ): Promise<ModelEntry | null> {
+  return (await rankQualifiedModels(db, category, opts, 1))[0] ?? null;
+}
+
+/** The routing order of resolveOptimalModel, best first, so a caller can fall back down the list. */
+export async function rankQualifiedModels(
+  db: D1Database,
+  category: string = "general_reasoning",
+  opts: RouteOptions = {},
+  limit = 5
+): Promise<ModelEntry[]> {
   const now = Date.now();
   const where = ["lifecycle = 'qualified'", "status = 'active'"];
   const params: any[] = [];
@@ -114,6 +126,10 @@ export async function resolveOptimalModel(
     where.push("output_cost_per_1m IS NOT NULL AND output_cost_per_1m <= ?");
     params.push(opts.maxOutputCostPer1M);
   }
+  if (opts.providers?.length) {
+    where.push(`provider IN (${opts.providers.map(() => "?").join(",")})`);
+    params.push(...opts.providers);
+  }
   // Quota awareness (factory-hub#80): exclude providers that are exhausted or rate limited
   where.push("provider NOT IN (SELECT provider FROM provider_quotas WHERE status IN ('exhausted', 'rate_limited') AND (resets_at IS NULL OR resets_at > ?))");
   params.push(now);
@@ -124,11 +140,11 @@ export async function resolveOptimalModel(
     ? "quality_score DESC, CASE WHEN tier = 'OAUTH' THEN 0 WHEN tier = 'FREE_TIER' THEN 1 ELSE 2 END ASC, COALESCE(output_cost_per_1m, 1e9) ASC, tokens_per_sec DESC"
     : "quality_score DESC, COALESCE(output_cost_per_1m, 1e9) ASC, tokens_per_sec DESC";
 
-  const row = await db
-    .prepare(`SELECT * FROM model_catalog WHERE ${where.join(" AND ")} ORDER BY ${order} LIMIT 1`)
-    .bind(...params)
-    .first<any>();
-  return row ? mapModel(row) : null;
+  const { results } = await db
+    .prepare(`SELECT * FROM model_catalog WHERE ${where.join(" AND ")} ORDER BY ${order} LIMIT ?`)
+    .bind(...params, limit)
+    .all<any>();
+  return (results || []).map(mapModel);
 }
 
 export async function recordUsage(

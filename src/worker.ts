@@ -8,6 +8,7 @@ import { getModelCatalog, resolveOptimalModel, recordUsage, getTelemetryStats, m
 import { authGate } from "./auth.js";
 import { runDiscovery } from "./discovery.js";
 import { runProbeCycle, recordProbe } from "./probe.js";
+import { proxyRoute, listModels, chatCompletions } from "./proxy.js";
 
 interface Env {
   DB: D1Database;
@@ -84,6 +85,11 @@ export default {
       }
       return new Response(html, { status: 200, headers: { ...corsHeaders, "Content-Type": "text/html; charset=utf-8" } });
     }
+
+    // OpenAI-compatible inference (/v1/... or /api/inference/...): one URL and token for every client.
+    const proxied = proxyRoute(url.pathname);
+    if (proxied === "models" && method === "GET") return listModels(env, corsHeaders);
+    if (proxied === "chat" && method === "POST") return chatCompletions(request, env, corsHeaders, config.id);
 
     // API: List Model Catalog with Pricing and Benchmarks
     if (method === "GET" && url.pathname === "/api/models") {
